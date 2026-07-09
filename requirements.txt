@@ -1,5 +1,9 @@
-numpy
-pandas
-scipy
-streamlit
-altair
+# streamlit>=1.49 is REQUIRED: the app uses the width="stretch" API (the
+# replacement for the deprecated use_container_width). On older Streamlit,
+# width="stretch" raises "TypeError: 'str' object cannot be interpreted as an
+# integer" and the deploy prompts to upgrade Streamlit.
+streamlit>=1.49
+altair>=5.0
+numpy>=1.26
+pandas>=2.0
+scipy>=1.11

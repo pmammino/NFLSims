@@ -18,6 +18,18 @@ The app reads the slate straight from the repo files: `projections.csv`,
 `ownership.csv`, `schedule.csv`, and the learned `field_params_nfl.json`
 (regenerate with `python3 learn_field.py`).
 
+> **Deploying (Streamlit Community Cloud):** `requirements.txt` pins
+> `streamlit>=1.49` — the app uses the `width="stretch"` layout API, and an
+> older Streamlit raises `TypeError: 'str' object cannot be interpreted as an
+> integer` and prompts you to upgrade. If a deploy is stuck on an old version,
+> reboot it (or clear the cache) so the pinned requirements reinstall.
+>
+> **Memory:** contest scoring builds an `(n_sims × field_size)` matrix per size,
+> which is freed immediately after use; only small per-place cut scores are kept.
+> On a hosted free tier keep `field size × sim runs` modest (the defaults —
+> 1k/6k fields at 10k sims — are safe); very large fields (20k+) at high sim
+> counts can exceed the memory limit while a run is in progress.
+
 ## Tabbed workspace
 
 - **⚙️ Setup** — slate summary (offense matched, team defenses, teams/games,

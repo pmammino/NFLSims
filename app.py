@@ -553,6 +553,44 @@ with tabs[3]:
                         "Max%": st.column_config.NumberColumn(min_value=0, max_value=100, step=5)})
                 team_caps, team_mins = _caps_from_editor(ted, "Team")
 
+        # ---- value groups: spread exposure across near-twin players ----
+        group_of, group_cap = None, 1.0
+        with st.expander("Value groups — spread across near-twin players"):
+            vg1, vg2, vg3 = st.columns(3)
+            sal_tol = vg1.number_input("Salary tolerance ($)", 0, 3000, 300, 50)
+            proj_tol = vg2.number_input("Projection tolerance (pts)",
+                                        0.0, 15.0, 2.0, 0.5)
+            # only cluster rosterable, real-projection players — replacement-
+            # level scrubs all sit near 0 pts and would chain into one huge group
+            meta = {}
+            for k in cand_keys:
+                e = KEY_META.get(k)
+                arr = sim.dk.get(k)
+                if not e or arr is None:
+                    continue
+                if not (e.get("matched") or e["pos"] == "DST"):
+                    continue
+                pr = float(arr.mean())
+                if pr < 5.0:
+                    continue
+                meta[k] = {"pos": e["pos"], "salary": e["salary"],
+                           "proj": pr, "team": e.get("team", "")}
+            g_of, groups = portfolio.detect_value_groups(
+                meta, salary_tol=int(sal_tol), proj_tol=float(proj_tol))
+            if groups:
+                gtbl = pd.DataFrame([
+                    {"Group": gi + 1, "Pos": g["pos"],
+                     "Players": ", ".join(KEY_NAME.get(k, k) for k in g["players"]),
+                     "Salary": f"${g['salary_lo']:,}–${g['salary_hi']:,}",
+                     "Proj": f"{g['proj_lo']:.1f}–{g['proj_hi']:.1f}"}
+                    for gi, g in enumerate(groups)])
+                st.dataframe(gtbl, width="stretch", height=220, hide_index=True)
+                gc = vg3.slider("Max value-group exposure", 0.1, 1.0, 1.0, 0.05)
+                if gc < 1.0:
+                    group_of, group_cap = g_of, gc
+            else:
+                vg3.caption("No near-twin groups at these tolerances.")
+
         if st.button("Build export set", type="primary"):
             if objective == "ev":
                 prize = pev.make_payout_curve(size, entry_fee)
@@ -567,7 +605,7 @@ with tabs[3]:
                     skill_cap=skill_cap, dst_cap=dst_cap, team_cap=team_cap,
                     max_overlap=max_overlap, player_caps=player_caps,
                     team_caps=team_caps, player_mins=player_mins,
-                    team_mins=team_mins)
+                    team_mins=team_mins, group_of=group_of, group_cap=group_cap)
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Lineups", info["chosen"])
                 m2.metric("Exp $ / entry", f"${info['exp_return']/max(info['chosen'],1):.2f}")
@@ -584,7 +622,8 @@ with tabs[3]:
                     res, int(n_sel), keymap, skill_cap=skill_cap, dst_cap=dst_cap,
                     team_cap=team_cap, max_overlap=max_overlap,
                     player_caps=player_caps, team_caps=team_caps,
-                    player_mins=player_mins, team_mins=team_mins)
+                    player_mins=player_mins, team_mins=team_mins,
+                    group_of=group_of, group_cap=group_cap)
                 m1, m2, m3 = st.columns(3)
                 m1.metric("Lineups", info["chosen"])
                 m2.metric("Distinct stacks", info["distinct_cores"])

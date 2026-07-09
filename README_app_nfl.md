@@ -35,8 +35,11 @@ The app reads the slate straight from the repo files: `projections.csv`,
 - **⬇️ Export** — diversity-aware or **payout-EV** lineup selection. Exposure
   control is either **global caps** (max player / DST / stack-team exposure) or
   **per-player and per-team min–max editors** (set a floor/ceiling on any
-  player's or stack team's share of the exported set, like the MLB app). Plus
-  max overlap, risk posture, and entry fee. Shows a name-annotated lineup
+  player's or stack team's share of the exported set, like the MLB app). A
+  **value-groups** control detects near-twin players (same position, close
+  salary + projection) and caps combined exposure across each group, so the set
+  spreads over interchangeable plays instead of forcing one. Plus max overlap,
+  risk posture, and entry fee. Shows a name-annotated lineup
   preview, a portfolio-return chart, player + stack-team exposure breakdowns,
   and a one-click **DK upload CSV** download (header
   `QB,RB,RB,WR,WR,WR,TE,FLEX,DST`, DraftKings contest IDs).

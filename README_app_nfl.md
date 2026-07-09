@@ -32,15 +32,22 @@ The app reads the slate straight from the repo files: `projections.csv`,
 - **🏆 Results** — per-contest candidate finish rates (Win% / Top10% / Top100% /
   AvgPlace), the field's QB-stack composition, and any candidate's
   finishing-place distribution across all sims.
-- **⬇️ Export** — diversity-aware or **payout-EV** lineup selection (objective,
-  per-player / DST / stack-team exposure caps, max overlap, risk posture, entry
-  fee) with a portfolio-return chart and a one-click **DK upload CSV** download
-  (header `QB,RB,RB,WR,WR,WR,TE,FLEX,DST`, DraftKings contest IDs).
+- **⬇️ Export** — diversity-aware or **payout-EV** lineup selection. Exposure
+  control is either **global caps** (max player / DST / stack-team exposure) or
+  **per-player and per-team min–max editors** (set a floor/ceiling on any
+  player's or stack team's share of the exported set, like the MLB app). Plus
+  max overlap, risk posture, and entry fee. Shows a name-annotated lineup
+  preview, a portfolio-return chart, player + stack-team exposure breakdowns,
+  and a one-click **DK upload CSV** download (header
+  `QB,RB,RB,WR,WR,WR,TE,FLEX,DST`, DraftKings contest IDs).
 
 ## Notes
 
-- Players are keyed by `RotoPlayerID` (the source files carry no names); DST by
-  team. Uploads use DraftKings contest IDs, so they import directly.
+- Real player names come from `player_names.csv` (`ID,firstname,lastname`, where
+  `ID` = `RotoPlayerID`). Delete/replace it and the app falls back to id labels;
+  DST always displays as `TEAM DST`. Internally the engine still keys on the
+  stable entity id, and uploads use DraftKings contest IDs, so they import
+  directly regardless.
 - Caching is keyed on input-file mtimes and the sim settings, so editing
   `projections.csv` / `ownership.csv` / `schedule.csv` busts the cache.
 - Windows-portable (pure Python + numpy/pandas/scipy + streamlit/altair).

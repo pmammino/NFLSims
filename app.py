@@ -256,6 +256,35 @@ mt = (_mtime(PROJ_CSV), _mtime(OWN_CSV), _mtime(SCHED_CSV))
 slate = cached_slate(*mt)
 params = cached_params(PARAMS_PATH, _mtime(PARAMS_PATH))
 n_matched = sum(p["matched"] for p in slate.players)
+KEY_NAME = {e["key"]: e.get("name", e["key"]) for e in slate.entities}
+KEY_META = {e["key"]: e for e in slate.entities}
+
+
+def _cell_to_name(cell):
+    """'O123 (TEAM)' -> 'Real Name (TEAM)' for display."""
+    key, team = portfolio._split(cell)
+    return f"{KEY_NAME.get(key, key)} ({team})"
+
+
+def relabel_cells(df, cols):
+    out = df.copy()
+    for c in cols:
+        if c in out.columns:
+            out[c] = out[c].map(_cell_to_name)
+    return out
+
+
+def _caps_from_editor(edf, id_col):
+    """Turn a min/max editor table into (caps, mins) dicts keyed by `id_col`,
+    as fractions; omit entries left at the defaults (max 100 / min 0)."""
+    caps, mins = {}, {}
+    for _, r in edf.iterrows():
+        mx, mn = float(r["Max%"]) / 100.0, float(r["Min%"]) / 100.0
+        if mx < 1.0:
+            caps[r[id_col]] = mx
+        if mn > 0.0:
+            mins[r[id_col]] = mn
+    return caps, mins
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Offense (matched)", f"{len(slate.players)} ({n_matched})")
@@ -371,23 +400,27 @@ with tabs[1]:
     view = ptab[ptab.Pos.isin(pos_filter)]
     if only_matched:
         view = view[view.Matched | (view.Pos == "DST")]
-    show_cols = ["Pos", "Team", "Opp", "Salary", "Ownership", "Proj",
+    view = view.reset_index(drop=True)
+    show_cols = ["Name", "Pos", "Team", "Opp", "Salary", "Ownership", "Proj",
                  "Floor_p25", "Median_p50", "Ceiling_p75", "p90", "p99",
-                 "Std", "Val", "Bust%", "3x%", "5x%", "PlayerID"]
+                 "Std", "Val", "Bust%", "3x%", "5x%"]
     st.dataframe(view[show_cols], width="stretch", height=460,
                  hide_index=True)
 
     st.markdown("##### Player score distribution")
     pick = st.selectbox(
-        "Player (by projection)",
-        view["PlayerID"].astype(str) + " · " + view["Pos"] + " " + view["Team"],
+        "Player (by projection)", list(view.index),
+        format_func=lambda i: f"{view.at[i, 'Name']} · {view.at[i, 'Pos']} "
+                              f"{view.at[i, 'Team']}",
         index=0 if len(view) else None)
-    if pick:
-        pid = pick.split(" · ")[0]
-        row = view[view["PlayerID"].astype(str) == pid].iloc[0]
-        key = f"DST_{row['Team']}" if row["Pos"] == "DST" else f"O{pid}"
+    if pick is not None:
+        row = view.loc[pick]
+        key = (f"DST_{row['Team']}" if row["Pos"] == "DST"
+               else f"O{row['PlayerID']}")
         arr = sim.dk.get(key)
         if arr is not None:
+            st.markdown(f"**{row['Name']}** · {row['Pos']} {row['Team']} "
+                        f"vs {row['Opp']} · ${int(row['Salary'])}")
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Proj", f"{row['Proj']:.1f}")
             m2.metric("Ceiling p75", f"{row['Ceiling_p75']:.1f}")
@@ -417,8 +450,9 @@ with tabs[2]:
         rcols = ["Candidate", "QB", "RB1", "RB2", "WR1", "WR2", "WR3", "TE",
                  "FLEX", "DST", "QBstack", "Salary", "Win%", "Top10%",
                  "Top100%", "AvgPlace"]
-        st.dataframe(res[rcols].head(200), width="stretch",
-                     height=400, hide_index=True)
+        slot_cols = ["QB", "RB1", "RB2", "WR1", "WR2", "WR3", "TE", "FLEX", "DST"]
+        st.dataframe(relabel_cells(res[rcols].head(200), slot_cols),
+                     width="stretch", height=400, hide_index=True)
 
         cc1, cc2 = st.columns(2)
         with cc1:
@@ -456,22 +490,70 @@ with tabs[3]:
                                    "win": "Win rate"}[x])
         n_sel = e3.number_input("Lineups to export", 1, 150, 20)
 
-        f1, f2, f3, f4 = st.columns(4)
-        skill_cap = f1.slider("Max player exposure", 0.1, 1.0, 1.0, 0.05)
-        dst_cap = f2.slider("Max DST exposure", 0.1, 1.0, 1.0, 0.05)
-        team_cap = f3.slider("Max stack-team exposure", 0.1, 1.0, 1.0, 0.05)
-        max_overlap = f4.slider("Max lineup overlap", 0.3, 1.0, 1.0, 0.05)
-
-        g1, g2 = st.columns(2)
-        utility = g1.selectbox("Risk posture (EV only)", list(pev.UTILITIES.keys()),
+        g1, g2, g3 = st.columns(3)
+        max_overlap = g1.slider("Max lineup overlap", 0.3, 1.0, 1.0, 0.05)
+        utility = g2.selectbox("Risk posture (EV only)", list(pev.UTILITIES.keys()),
                                index=1)
-        entry_fee = g2.number_input("Entry fee ($, for EV payout curve)",
+        entry_fee = g3.number_input("Entry fee ($, for EV payout curve)",
                                     1.0, 10000.0, 20.0)
 
+        # ---- exposure control: global sliders OR per-entity min/max editors ---
+        slot_cols = ["QB", "RB1", "RB2", "WR1", "WR2", "WR3", "TE", "FLEX", "DST"]
+        res = run_state["results"][size].copy()
+        cand_mat = run_state["cand_mat"]
+        nsim = run_state["n_sims"]
+
+        # universe of keys / primary teams that actually appear in candidates
+        cand_keys = set()
+        for lu in run_state["cands"]:
+            for pl in lu["players"]:
+                cand_keys.add(pl["key"])
+        prim_teams = sorted({portfolio.lineup_features(res.iloc[i])["primary"]
+                             for i in range(min(len(res), 4000))} - {""})
+
+        skill_cap = dst_cap = team_cap = 1.0
+        player_caps = team_caps = player_mins = team_mins = None
+        mode = st.radio("Exposure control",
+                        ["Global caps", "Per-player / per-team min–max"],
+                        horizontal=True, key="exp_mode")
+        if mode == "Global caps":
+            gc1, gc2, gc3 = st.columns(3)
+            skill_cap = gc1.slider("Max player exposure", 0.1, 1.0, 1.0, 0.05)
+            dst_cap = gc2.slider("Max DST exposure", 0.1, 1.0, 1.0, 0.05)
+            team_cap = gc3.slider("Max stack-team exposure", 0.1, 1.0, 1.0, 0.05)
+        else:
+            with st.expander("Per-player exposure (min / max %)", expanded=True):
+                prows = []
+                for k in cand_keys:
+                    e = KEY_META.get(k)
+                    if not e:
+                        continue
+                    prows.append({"key": k, "Name": e.get("name", k),
+                                  "Pos": e["pos"], "Team": e.get("team", ""),
+                                  "Own%": round(e.get("own", 0.0), 1),
+                                  "Min%": 0, "Max%": 100})
+                pdf = pd.DataFrame(prows).sort_values(
+                    ["Own%"], ascending=False).reset_index(drop=True)
+                ped = st.data_editor(
+                    pdf, hide_index=True, height=330, key="player_expo_editor",
+                    disabled=["key", "Name", "Pos", "Team", "Own%"],
+                    column_order=["Name", "Pos", "Team", "Own%", "Min%", "Max%"],
+                    column_config={
+                        "Min%": st.column_config.NumberColumn(min_value=0, max_value=100, step=5),
+                        "Max%": st.column_config.NumberColumn(min_value=0, max_value=100, step=5)})
+                player_caps, player_mins = _caps_from_editor(ped, "key")
+            with st.expander("Per-team (primary stack) exposure (min / max %)"):
+                tdf = pd.DataFrame([{"Team": t, "Min%": 0, "Max%": 100}
+                                    for t in prim_teams])
+                ted = st.data_editor(
+                    tdf, hide_index=True, height=280, key="team_expo_editor",
+                    disabled=["Team"],
+                    column_config={
+                        "Min%": st.column_config.NumberColumn(min_value=0, max_value=100, step=5),
+                        "Max%": st.column_config.NumberColumn(min_value=0, max_value=100, step=5)})
+                team_caps, team_mins = _caps_from_editor(ted, "Team")
+
         if st.button("Build export set", type="primary"):
-            res = run_state["results"][size].copy()
-            cand_mat = run_state["cand_mat"]
-            nsim = run_state["n_sims"]
             if objective == "ev":
                 prize = pev.make_payout_curve(size, entry_fee)
                 cut = pev.field_place_cutpoints(size)
@@ -483,7 +565,9 @@ with tabs[3]:
                 chosen, info, W = portfolio.select_portfolio_ev(
                     res, int(n_sel), pay, pev.utility(utility),
                     skill_cap=skill_cap, dst_cap=dst_cap, team_cap=team_cap,
-                    max_overlap=max_overlap)
+                    max_overlap=max_overlap, player_caps=player_caps,
+                    team_caps=team_caps, player_mins=player_mins,
+                    team_mins=team_mins)
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Lineups", info["chosen"])
                 m2.metric("Exp $ / entry", f"${info['exp_return']/max(info['chosen'],1):.2f}")
@@ -498,32 +582,47 @@ with tabs[3]:
                           "top100": ["Top100%", "Top10%", "Win%"]}[objective]
                 chosen, info = portfolio.select_portfolio(
                     res, int(n_sel), keymap, skill_cap=skill_cap, dst_cap=dst_cap,
-                    team_cap=team_cap, max_overlap=max_overlap)
+                    team_cap=team_cap, max_overlap=max_overlap,
+                    player_caps=player_caps, team_caps=team_caps,
+                    player_mins=player_mins, team_mins=team_mins)
                 m1, m2, m3 = st.columns(3)
                 m1.metric("Lineups", info["chosen"])
                 m2.metric("Distinct stacks", info["distinct_cores"])
                 m3.metric("Max team", info["max_team"])
 
+            # name-annotated lineup preview
+            st.markdown("##### Selected lineups")
+            prev = pd.DataFrame(list(chosen))
+            prev_cols = [c for c in slot_cols if c in prev.columns]
+            keep = prev_cols + [c for c in ("QBstack", "Salary") if c in prev.columns]
+            st.dataframe(relabel_cells(prev[keep], prev_cols),
+                         width="stretch", height=300, hide_index=True)
+
             up = exports.dk_upload(chosen, slate)   # duplicate DK headers (CSV)
-            st.markdown("##### DK upload")
-            # st.dataframe/pyarrow can't render duplicate columns; show unique
-            # slot labels on screen while the download keeps the DK header format
-            disp = up.copy()
-            disp.columns = ["QB", "RB1", "RB2", "WR1", "WR2", "WR3",
-                            "TE", "FLEX", "DST"]
-            st.dataframe(disp, width="stretch", height=320, hide_index=True)
             st.download_button(
-                "⬇  Download DK_upload.csv", up.to_csv(index=False),
+                "⬇  Download DK_upload.csv (DraftKings IDs)", up.to_csv(index=False),
                 file_name=f"DK_upload_{size}.csv", mime="text/csv",
                 type="primary")
 
-            # exposure summary
-            exp = pd.DataFrame(
-                sorted(info["team_expo"].items(), key=lambda kv: -kv[1]),
-                columns=["Stack team", "Lineups"])
-            if len(exp):
+            # exposure breakdown (with player names)
+            b1, b2 = st.columns(2)
+            with b1:
+                st.markdown("##### Player exposure")
+                pe = sorted(info["player_expo"].items(), key=lambda kv: -kv[1])
+                pe_df = pd.DataFrame(
+                    [{"Player": KEY_NAME.get(k, k),
+                      "Pos": KEY_META.get(k, {}).get("pos", ""),
+                      "Lineups": v, "Exposure%": round(100 * v / max(info["chosen"], 1), 1)}
+                     for k, v in pe])
+                st.dataframe(pe_df, width="stretch", height=260, hide_index=True)
+            with b2:
                 st.markdown("##### Primary-stack team exposure")
-                st.dataframe(exp, width="stretch", height=220,
-                             hide_index=True)
+                te_df = pd.DataFrame(
+                    [{"Stack team": t, "Lineups": v,
+                      "Exposure%": round(100 * v / max(info["chosen"], 1), 1)}
+                     for t, v in sorted(info["team_expo"].items(), key=lambda kv: -kv[1])])
+                st.dataframe(te_df, width="stretch", height=260, hide_index=True)
             if info["unmet_mins"]:
-                st.warning(f"Unmet minimums: {info['unmet_mins']}")
+                labeled = [{**u, "name": KEY_NAME.get(u["name"], u["name"])}
+                           for u in info["unmet_mins"]]
+                st.warning(f"Unmet minimums (pool couldn't supply): {labeled}")

@@ -91,6 +91,27 @@ def _load_ownership(path):
         return list(csv.DictReader(fh))
 
 
+def _load_names(path):
+    """Optional crosswalk: player id -> 'First Last'. Tolerant of latin-1."""
+    names = {}
+    if not path or not os.path.exists(path):
+        return names
+    for enc in ("utf-8-sig", "latin-1"):
+        try:
+            with open(path, newline="", encoding=enc) as fh:
+                for r in csv.DictReader(fh):
+                    pid = (r.get("ID") or "").strip()
+                    nm = f"{(r.get('firstname') or '').strip()} " \
+                         f"{(r.get('lastname') or '').strip()}".strip()
+                    if pid and nm:
+                        names[pid] = nm
+            break
+        except UnicodeDecodeError:
+            names.clear()
+            continue
+    return names
+
+
 def _load_schedule(path):
     """team -> {opp, total, implied}. total/implied optional."""
     sched = {}
@@ -177,10 +198,12 @@ def _game_id(a, b):
 
 
 def build_slate(projections="projections.csv", ownership="ownership.csv",
-                schedule="schedule.csv", dst_teams="dst_teams.csv"):
+                schedule="schedule.csv", dst_teams="dst_teams.csv",
+                names="player_names.csv"):
     proj, by_team = _load_projections(projections)
     pool = _load_ownership(ownership)
     sched = _load_schedule(schedule)
+    name_map = _load_names(names)
 
     # ---- offensive players ----
     players = []
@@ -205,6 +228,7 @@ def build_slate(projections="projections.csv", ownership="ownership.csv",
         rec = {
             "key": f"O{rid}", "rid": rid, "pid": r["PlayerID"].strip(),
             "contest_id": r["PlayerContestID"].strip(),
+            "name": name_map.get(rid, f"#{rid}"),
             "pos": pos, "team": team, "salary": salary, "own": own,
             "matched": matched, "stats": stats, "fp": fp,
         }
@@ -300,7 +324,7 @@ def _dst_rec(r, team, dst_team_proj, sched, opp_of):
     tp = dst_team_proj[team]
     opp = opp_of(team)
     return {
-        "key": f"DST_{team}", "team": team,
+        "key": f"DST_{team}", "team": team, "name": f"{team} DST",
         "contest_id": r["PlayerContestID"].strip(),
         "rid": r["RotoPlayerID"].strip(), "pid": r["PlayerID"].strip(),
         "pos": "DST", "salary": int(_f(r["Salary"])), "own": _f(r["Ownership"]),

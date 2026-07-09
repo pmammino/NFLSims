@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 
 PLAYER_COLS = [
-    "PlayerID", "ContestID", "Pos", "Team", "Opp", "Salary", "Ownership",
+    "Name", "PlayerID", "ContestID", "Pos", "Team", "Opp", "Salary", "Ownership",
     "Proj", "Floor_p25", "Median_p50", "Ceiling_p75", "p10", "p90", "p99",
     "Max", "Std", "Val", "Bust%", "3x%", "5x%", "Matched",
     "mean_pass_yds", "mean_rush_yds", "mean_rec_yds", "mean_rec",
@@ -34,6 +34,7 @@ def player_table(sim, slate):
         val = arr / per1k
         sm = sim.stat_means.get(e["key"], {})
         rows.append({
+            "Name": e.get("name", ""),
             "PlayerID": e.get("rid", ""),
             "ContestID": e.get("contest_id", ""),
             "Pos": e["pos"], "Team": e.get("team", ""), "Opp": e.get("opp", ""),

@@ -1,0 +1,4 @@
+# generated simulation outputs (regenerate with run_sim.py)
+out/
+__pycache__/
+*.pyc

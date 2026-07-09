@@ -217,11 +217,10 @@ def portfolio_return_chart(W, entry_cost):
     return (base + rule).properties(height=240)
 
 
-def stack_dist_chart(field):
-    c = Counter(lu["stack"] for lu in field)
-    tot = sum(c.values()) or 1
+def stack_dist_chart(stack_counts):
+    tot = sum(stack_counts.values()) or 1
     df = pd.DataFrame([{"stack": f"QB+{k}", "pct": 100 * v / tot}
-                       for k, v in sorted(c.items())])
+                       for k, v in sorted(stack_counts.items())])
     return alt.Chart(df).mark_bar(color=RW_PURPLE).encode(
         x=alt.X("stack:N", title="primary stack size", sort=None),
         y=alt.Y("pct:Q", title="% of field"),
@@ -274,6 +273,22 @@ def relabel_cells(df, cols):
     return out
 
 
+def places_from_cut(cscore, field_cut, cut_places, n_field):
+    """Approximate a candidate's finishing place per sim from the field's
+    per-place cut scores (avoids keeping the full field matrix in memory).
+
+    `field_cut` is (n_sims, n_cut) field scores descending by place; `cut_places`
+    the matching places (ascending). Interpolates each sim's candidate score onto
+    the score->place curve."""
+    cp = np.asarray(cut_places, dtype=float)
+    out = np.empty(len(cscore), dtype=float)
+    for s in range(len(cscore)):
+        xs = field_cut[s][::-1]          # scores ascending
+        fp = cp[::-1]                    # places descending (match xs)
+        out[s] = np.interp(cscore[s], xs, fp)
+    return np.clip(out, 1, n_field)
+
+
 def _caps_from_editor(edf, id_col):
     """Turn a min/max editor table into (caps, mins) dicts keyed by `id_col`,
     as fractions; omit entries left at the defaults (max 100 / min 0)."""
@@ -311,7 +326,10 @@ with tabs[0]:
     b1, b2, b3 = st.columns(3)
     sizes = b1.multiselect("Contest sizes (entries)",
                            [1000, 3000, 6000, 20000, 50000],
-                           default=[1000, 6000, 20000])
+                           default=[1000, 6000],
+                           help="Very large fields (20k+) at high sim counts use "
+                                "a lot of memory while a run is in progress — on a "
+                                "hosted free tier keep field size × sim runs modest.")
     medium = b2.select_slider("Baseline (medium) size",
                               options=[1000, 3000, 6000, 20000], value=6000)
     chalk = b3.slider("Chalk sensitivity", 0.0, 0.8, 0.30, 0.05,
@@ -352,7 +370,11 @@ with tabs[0]:
                 cand_df = fb.lineups_to_df(cands)
                 cand_mat = contest_sim.score_matrix(cands, sim.dk, int(n_sims))
 
-                results, fields, field_mats = {}, {}, {}
+                # Memory-safe: the full (n_sims x field_size) matrix is built,
+                # used, then discarded each size. Only the small per-place cut
+                # scores (n_sims x ~360) and a stack-size tally are KEPT — storing
+                # every full field matrix would blow the hosted memory limit.
+                results, field_cut, cut_places, field_stack = {}, {}, {}, {}
                 for N in sorted(sizes):
                     st.write(f"Field for {N:,}-entry contest…")
                     adj, p_sz, beta = fs.prepare_field_pool(
@@ -363,6 +385,12 @@ with tabs[0]:
                     fmat = contest_sim.score_matrix(field, sim.dk, int(n_sims))
                     wins, t10, t100, avg = contest_sim.run_contest(
                         fmat, cand_mat, int(n_sims), N)
+                    cut = pev.field_place_cutpoints(len(field))
+                    fs_desc = -np.sort(-fmat, axis=1)
+                    field_cut[N] = fs_desc[:, np.clip(cut - 1, 0, fmat.shape[1] - 1)]
+                    cut_places[N] = cut
+                    field_stack[N] = dict(Counter(lu["stack"] for lu in field))
+                    del fmat, fs_desc, field       # free the big arrays now
                     res = cand_df.copy()
                     res.insert(0, "Candidate", np.arange(1, len(cands) + 1))
                     res["Win%"] = np.round(100 * wins / n_sims, 3)
@@ -373,15 +401,14 @@ with tabs[0]:
                     res = res.sort_values(
                         ["Win%", "Top10%", "Top100%"], ascending=False)
                     results[N] = res
-                    fields[N] = field
-                    field_mats[N] = fmat
                     status.write(f"  {N:,}: best Win% {res['Win%'].max():.2f}, "
                                  f"best Top100% {res['Top100%'].max():.1f} (beta {beta:.2f})")
                 status.update(label="Done — see Results and Export.", state="complete")
 
             st.session_state["run"] = {
                 "cands": cands, "cand_df": cand_df, "cand_mat": cand_mat,
-                "results": results, "fields": fields, "field_mats": field_mats,
+                "results": results, "field_cut": field_cut,
+                "cut_places": cut_places, "field_stack": field_stack,
                 "n_sims": int(n_sims), "sizes": sorted(sizes),
             }
 
@@ -440,7 +467,6 @@ with tabs[2]:
         size = st.selectbox("Contest size", run_state["sizes"],
                             index=len(run_state["sizes"]) // 2)
         res = run_state["results"][size]
-        field = run_state["fields"][size]
         nsim = run_state["n_sims"]
         d1, d2, d3 = st.columns(3)
         d1.metric("Best Win%", f"{res['Win%'].max():.2f}%")
@@ -457,17 +483,16 @@ with tabs[2]:
         cc1, cc2 = st.columns(2)
         with cc1:
             st.markdown("##### Field stack composition")
-            st.altair_chart(stack_dist_chart(field), width="stretch")
+            st.altair_chart(stack_dist_chart(run_state["field_stack"][size]),
+                            width="stretch")
         with cc2:
             st.markdown("##### Finishing-place distribution")
             cand_no = st.number_input(
                 "Candidate #", min_value=1, max_value=len(run_state["cands"]),
                 value=int(res.iloc[0]["Candidate"]))
-            fmat = run_state["field_mats"][size]
             cscore = run_state["cand_mat"][:, int(cand_no) - 1]
-            fs_desc = np.sort(fmat, axis=1)
-            places = size - np.array([np.searchsorted(fs_desc[s], cscore[s], "right")
-                                      for s in range(nsim)]) + 1
+            places = places_from_cut(cscore, run_state["field_cut"][size],
+                                     run_state["cut_places"][size], size)
             st.altair_chart(place_distribution_chart(places, size),
                             width="stretch")
 
@@ -594,10 +619,8 @@ with tabs[3]:
         if st.button("Build export set", type="primary"):
             if objective == "ev":
                 prize = pev.make_payout_curve(size, entry_fee)
-                cut = pev.field_place_cutpoints(size)
-                fmat = run_state["field_mats"][size]
-                fs_desc = -np.sort(-fmat, axis=1)
-                field_cut = fs_desc[:, np.clip(cut - 1, 0, fs_desc.shape[1] - 1)]
+                cut = run_state["cut_places"][size]
+                field_cut = run_state["field_cut"][size]
                 order = res["Candidate"].to_numpy() - 1
                 pay = pev.candidate_payout_matrix(cand_mat[:, order], field_cut, cut, prize)
                 chosen, info, W = portfolio.select_portfolio_ev(

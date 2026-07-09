@@ -1,0 +1,112 @@
+{
+  "stack_sizes": [
+    [
+      0,
+      0.15
+    ],
+    [
+      1,
+      0.33
+    ],
+    [
+      2,
+      0.37
+    ],
+    [
+      3,
+      0.13
+    ],
+    [
+      4,
+      0.02
+    ]
+  ],
+  "bringback": [
+    [
+      0,
+      0.45
+    ],
+    [
+      1,
+      0.42
+    ],
+    [
+      2,
+      0.13
+    ]
+  ],
+  "flex_pos": [
+    [
+      "RB",
+      0.288
+    ],
+    [
+      "WR",
+      0.3385
+    ],
+    [
+      "TE",
+      0.3735
+    ]
+  ],
+  "rules": {
+    "dst_vs_own_stack_prob": 0.08
+  },
+  "learned": {
+    "source_files": [
+      "contest-standings-185025845.csv",
+      "contest-standings-186154632.csv"
+    ],
+    "n_contests": 2,
+    "n_entries_total": 7977,
+    "flex_observations": 7965,
+    "flex_pos_learned": [
+      [
+        "RB",
+        0.288
+      ],
+      [
+        "WR",
+        0.3385
+      ],
+      [
+        "TE",
+        0.3735
+      ]
+    ],
+    "flex_pos_source": "standings",
+    "stack_source": "prior (name-only standings lack team; supply a name->team crosswalk to learn stacks)",
+    "ownership": {
+      "contest-standings-185025845.csv": {
+        "n_players": 197,
+        "n_entries": 4444,
+        "max_owned": 44.78,
+        "mean_owned": 4.57,
+        "top10pct_mean_owned": 24.81,
+        "n_over_25pct": 7
+      },
+      "contest-standings-186154632.csv": {
+        "n_players": 194,
+        "n_entries": 3533,
+        "max_owned": 49.87,
+        "mean_owned": 4.64,
+        "top10pct_mean_owned": 22.84,
+        "n_over_25pct": 6
+      }
+    },
+    "duplication": {
+      "contest-standings-185025845.csv": {
+        "n_entries": 4444,
+        "distinct_lineups": 4277,
+        "pct_duplicated": 5.5,
+        "max_dupes_one_lineup": 32
+      },
+      "contest-standings-186154632.csv": {
+        "n_entries": 3533,
+        "distinct_lineups": 3413,
+        "pct_duplicated": 5.4,
+        "max_dupes_one_lineup": 12
+      }
+    }
+  }
+}

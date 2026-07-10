@@ -33,6 +33,7 @@ SPLITS = ("F", "M", "C")           # floor(p25), median(p50), ceiling(p75)
 # projections.csv column -> offensive scoring stat key
 OFF_STAT_COLS = {
     "pass_yards": ["PassYards"],
+    "pass_completions": ["PassCompletions"],   # reception anchor (not scored)
     "pass_tds": ["PassTDs"],
     "pass_ints": ["PassInts"],
     "rush_yards": ["RushYards"],

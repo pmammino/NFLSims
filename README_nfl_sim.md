@@ -79,30 +79,33 @@ schedule.csv  ──┘            │
 
 ## The correlated simulation (`sim_engine.py`)
 
-For each player and each DK-relevant stat we fit a **lognormal** to the
-`(floor=p25, median=p50, ceiling=p75)` triple (median-anchored; IQR sets the log
-spread). We then draw one standard-normal latent per player from a **Gaussian
-copula** whose target correlation matrix encodes NFL structure:
+The sim is **hierarchical and game-consistent** rather than a flat copula, so a
+QB and his receivers can't independently boom in the same sim (which would
+double-count the same passing yards and fatten the tail).
 
-| relationship | target ρ |
-|---|---|
-| QB ↔ own WR/TE | +0.55 / +0.50 |
-| WR ↔ WR (same team) | +0.30 |
-| WR/TE ↔ own RB | −0.05 |
-| RB ↔ RB (same team) | −0.20 |
-| QB ↔ opp pass-catcher (game stack) | +0.18 |
-| skill ↔ opp skill (same game) | +0.10 |
-| DST ↔ opponent offense | via points-allowed (negative) |
-| DST ↔ own offense | +0.10 |
-| different game | 0 |
+1. **Latents.** Per sim: a game latent (shootout), a team-offense latent tied to
+   it (this is what creates bring-back / game-stack correlation), and team pass /
+   rush latents beneath it.
+2. **Marginals.** Every quantity is drawn from its *own* `(floor p25, median p50,
+   ceiling p75)` triple via `q_from_triple` — a quantile map that is
+   piecewise-linear in standard-normal space with **damped tails** so p25/p75 are
+   honored exactly but the deep tails stay realistic (elite-RB p99 ≈ 70, QB/WR/TE
+   max ≈ 60–70).
+3. **Allocation (the key step).** The starting QB's passing line and each
+   pass-catcher's receiving line are each sampled from their own ranges, then the
+   receivers are **rescaled so their receptions / rec yards / rec TDs sum exactly
+   to the QB's completions / pass yards / pass TDs in every sim.** So team
+   receptions == QB completions, team rec yards == QB pass yards, team rec TDs ==
+   QB pass TDs — game-consistent, and each receiver's ceiling is bounded by the
+   team's realized passing total. Rushing is sampled per player from a team-rush
+   latent; DST points-allowed is derived from the opponent's simulated offense
+   (so DST anti-correlates with the offense it faces).
+4. **Scoring.** Final stats are scored per-sim by `dk_scoring`, so yardage bonuses
+   fire on realized yardage.
 
-The player latent is shared across that player's own stats (with a small
-per-stat idiosyncratic component, so yards and TDs move together but not
-identically). Sampled stats are scored per-sim by `dk_scoring`, so yardage
-bonuses fire on the realized yardage and the whole thing is internally
-consistent. The output is `{key: DK points [N_SIMS]}` plus per-stat sims for the
-player table. Optional Vegas `total_scale` (from `schedule.csv`) reshapes each
-team's mean and ceiling, exactly like the MLB engine's `total_scale`.
+The realized QB↔own-WR correlation lands ≈ 0.5 and WR↔WR ≈ 0.2. Output is `{key:
+DK points [N_SIMS]}` plus per-stat means for the player table. Optional Vegas
+`total_scale` (from `schedule.csv`) reshapes each team's offensive output.
 
 ## Modules
 

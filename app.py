@@ -35,6 +35,7 @@ import contest_sim
 import exports
 import portfolio
 import portfolio_ev as pev
+import stack_signal
 
 try:
     alt.data_transformers.disable_max_rows()
@@ -341,6 +342,38 @@ with tabs[0]:
     jitter = c2b.slider("Candidate jitter", 0.0, 0.6, 0.0, 0.05,
                         help="Lognormal shock on candidate selection to diversify the pool.")
 
+    with st.expander("Field realism & candidate sharpness", expanded=False):
+        r1, r2, r3 = st.columns(3)
+        sharp_frac = r1.slider(
+            "Sharp field fraction", 0.0, 1.0, fs.FIELD_SHARP_FRAC, 0.05,
+            help="Share of the field built sharp (bigger stacks, ceiling-weighted "
+                 "players, bring-backs) rather than naive chalk. A pure-chalk field "
+                 "is too soft — it hands a no-skill lineup a positive edge.")
+        overbuild = r2.slider(
+            "Field overbuild ×", 1.0, 3.0, fs.FIELD_OVERBUILD, 0.5,
+            help="Build this × the field size and keep the highest-projection "
+                 "lineups — the field you face is the better lineups people submit, "
+                 "not raw random draws.")
+        stack_boost = r3.slider(
+            "Stack-ownership ceiling boost", 0.0, 0.20, 0.05, 0.01,
+            help="Nudge popular offenses' high-end (ceiling) sims up, tied to "
+                 "projected stack ownership. Applied to both field and candidates.")
+        r4, r5, r6 = st.columns(3)
+        cand_stack_strength = r4.slider(
+            "Candidate stack tilt", 0.0, 1.5, 0.6, 0.1,
+            help="Lean your candidates toward bigger QB stacks than the field.")
+        cand_bringback = r5.slider(
+            "Candidate bring-back rate", 0.0, 1.0, 0.35, 0.05,
+            help="Chance a candidate forces a bring-back from the QB's opponent.")
+        cand_upside = r6.checkbox(
+            "Ceiling-weight candidate picks", value=True,
+            help="Weight candidate skill/FLEX picks by sim ceiling (p90) instead "
+                 "of ownership, so non-anchor spots are elite-upside players.")
+        own_uncertainty = st.checkbox(
+            "Mix field over ownership draws", value=False,
+            help="Rebuild the field from fresh ownership draws so grading stops "
+                 "treating projected ownership as a fact.")
+
     if params.get("learned"):
         lw = params["learned"]
         st.caption(
@@ -364,11 +397,32 @@ with tabs[0]:
             with st.status("Building candidates and scoring contests…",
                            expanded=True) as status:
                 st.write("Building candidate lineups…")
-                cb = fb.Builder(fb.Pool(slate.entities), params,
-                                seed=2025, uniform=True, jitter=float(jitter))
+                # stack-ownership ceiling signal on the sim scores (both field
+                # and candidates score off these boosted arrays)
+                names_by_team = stack_signal.offense_names_by_team(slate.entities)
+                own_by_key = {e["key"]: float(e.get("own", 0.0))
+                              for e in slate.entities}
+                stack_own = stack_signal.team_stack_ownership(
+                    names_by_team, own_by_key)
+                dkp = stack_signal.apply_stack_ownership_boost(
+                    sim.dk, names_by_team, stack_own, int(n_sims),
+                    strength=float(stack_boost))
+                dk_mean = {k: float(v.mean()) for k, v in dkp.items()}
+                for e in slate.entities:
+                    arr = dkp.get(e["key"])
+                    e["up"] = (float(np.percentile(arr, 90)) if arr is not None
+                               else max(float(e.get("own", 0.0)), 1e-3))
+
+                cparams = dict(params)
+                cparams["stack_sizes"] = fb.candidate_stack_sizes(
+                    params["stack_sizes"], float(cand_stack_strength))
+                cb = fb.Builder(fb.Pool(slate.entities), cparams,
+                                seed=2025, uniform=True, jitter=float(jitter),
+                                use_upside=bool(cand_upside),
+                                bringback_prob=float(cand_bringback))
                 cands, _ = build_many(cb, int(num_candidates), "candidates")
                 cand_df = fb.lineups_to_df(cands)
-                cand_mat = contest_sim.score_matrix(cands, sim.dk, int(n_sims))
+                cand_mat = contest_sim.score_matrix(cands, dkp, int(n_sims))
 
                 # Memory-safe: the full (n_sims x field_size) matrix is built,
                 # used, then discarded each size. Only the small per-place cut
@@ -377,12 +431,13 @@ with tabs[0]:
                 results, field_cut, cut_places, field_stack = {}, {}, {}, {}
                 for N in sorted(sizes):
                     st.write(f"Field for {N:,}-entry contest…")
-                    adj, p_sz, beta = fs.prepare_field_pool(
-                        slate.entities, params, N, n_med=int(medium),
-                        chalk_sensitivity=float(chalk), stack_tilt=float(stack_tilt))
-                    fbuild = fb.Builder(fb.Pool(adj), p_sz, seed=101 + N, uniform=False)
-                    field, _ = build_many(fbuild, N, f"field {N:,}")
-                    fmat = contest_sim.score_matrix(field, sim.dk, int(n_sims))
+                    field = fs.build_field(
+                        slate.entities, params, N, dk_mean, n_med=int(medium),
+                        chalk_sensitivity=float(chalk), stack_tilt=float(stack_tilt),
+                        sharp_frac=float(sharp_frac), overbuild=float(overbuild),
+                        seed=101 + N, own_uncertainty=bool(own_uncertainty))
+                    beta = fs.beta_for_size(N, int(medium), float(chalk))
+                    fmat = contest_sim.score_matrix(field, dkp, int(n_sims))
                     wins, t10, t100, avg = contest_sim.run_contest(
                         fmat, cand_mat, int(n_sims), N)
                     cut = pev.field_place_cutpoints(len(field))

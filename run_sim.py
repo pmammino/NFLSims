@@ -34,6 +34,7 @@ import contest_sim
 import exports
 import portfolio
 import portfolio_ev as pev
+import stack_signal
 
 
 def _build_set(builder, n, cap_mult=40):
@@ -60,6 +61,23 @@ def main():
     ap.add_argument("--stack-tilt", type=float, default=0.12)
     ap.add_argument("--jitter", type=float, default=0.0,
                     help="lognormal shock on candidate selection weights (diversify)")
+    # ---- realism / candidate-sharpness knobs (ported from DFSSimsFull) ----
+    ap.add_argument("--stack-boost", type=float, default=0.05,
+                    help="stack-ownership ceiling bump on the sim scores "
+                         "(0 = off); applied to BOTH field and candidates")
+    ap.add_argument("--sharp-frac", type=float, default=fs.FIELD_SHARP_FRAC,
+                    help="share of the field built sharp (stacked/ceiling/bring-back)")
+    ap.add_argument("--overbuild", type=float, default=fs.FIELD_OVERBUILD,
+                    help="build this x field size, keep the top by projection")
+    ap.add_argument("--own-uncertainty", action="store_true",
+                    help="mix the field over fresh ownership draws")
+    ap.add_argument("--cand-stack-strength", type=float, default=0.6,
+                    help="tilt candidate QB-stack sizes bigger (0 = field-shaped)")
+    ap.add_argument("--cand-bringback", type=float, default=0.35,
+                    help="candidate forced primary-opponent bring-back rate")
+    ap.add_argument("--no-cand-upside", dest="cand_upside", action="store_false",
+                    default=True,
+                    help="weight candidate skill picks by ownership, not ceiling")
     ap.add_argument("--params", default="field_params_nfl.json")
     ap.add_argument("--seed-field", type=int, default=101)
     ap.add_argument("--seed-candidates", type=int, default=2025)
@@ -102,25 +120,54 @@ def main():
     print(f"sim: {a.n_sims} sims  QB-WR corr {rc['qb_wr_same']:.2f}  "
           f"WR-WR corr {rc['wr_wr_same']:.2f}")
 
-    # ---- candidate set (uniform, stack-structured, ownership-blind) ----
+    # ---- stack-ownership ceiling signal on the sim scores ----
+    # Give popular offenses a small bump to their high-end (ceiling) sims, tied
+    # to projected stack ownership. Applied to the SAME arrays used to score both
+    # the field and our candidates, so it is a coherent re-weighting of reality
+    # (not a candidate-only thumb on the scale).
+    names_by_team = stack_signal.offense_names_by_team(slate.entities)
+    own_by_key = {e["key"]: float(e.get("own", 0.0)) for e in slate.entities}
+    stack_own = stack_signal.team_stack_ownership(names_by_team, own_by_key)
+    dkp = stack_signal.apply_stack_ownership_boost(
+        sim.dk, names_by_team, stack_own, a.n_sims, strength=a.stack_boost)
+    if a.stack_boost > 0:
+        print(f"stack-ownership boost: strength {a.stack_boost} on "
+              f"{sum(1 for t in stack_own if stack_own[t] > 0)} offenses")
+
+    # projection (mean) and ceiling (p90) per entity, from the boosted scores;
+    # `up` drives candidate ceiling-weighted picks, `dk_mean` ranks the field.
+    dk_mean = {k: float(v.mean()) for k, v in dkp.items()}
+    for e in slate.entities:
+        arr = dkp.get(e["key"])
+        e["up"] = float(np.percentile(arr, 90)) if arr is not None else \
+            max(float(e.get("own", 0.0)), 1e-3)
+
+    # ---- candidate set (ownership-blind teams, ceiling-weighted players,
+    #      bigger stacks, more bring-backs — the sharp posture) ----
+    cparams = dict(params)
+    cparams["stack_sizes"] = fb.candidate_stack_sizes(
+        params["stack_sizes"], a.cand_stack_strength)
     cpool = fb.Pool(slate.entities)
-    cb = fb.Builder(cpool, params, seed=a.seed_candidates, uniform=True, jitter=a.jitter)
+    cb = fb.Builder(cpool, cparams, seed=a.seed_candidates, uniform=True,
+                    jitter=a.jitter, use_upside=a.cand_upside,
+                    bringback_prob=a.cand_bringback)
     cands, cfails = _build_set(cb, a.num_candidates)
     cand_df = fb.lineups_to_df(cands)
     cand_df.to_csv(os.path.join(a.outdir, "candidates.csv"), index=False)
-    cand_mat = contest_sim.score_matrix(cands, sim.dk, a.n_sims)
+    cand_mat = contest_sim.score_matrix(cands, dkp, a.n_sims)
     print(f"candidates: {len(cands)} built ({cfails} fails), scored")
 
     # ---- field per contest size + contest scoring ----
     results_by_size, field_mat_by_size = {}, {}
     for N in a.contest_sizes:
-        adj, p_sz, beta = fs.prepare_field_pool(
-            slate.entities, params, N, n_med=a.medium,
-            chalk_sensitivity=a.chalk_sensitivity, stack_tilt=a.stack_tilt)
-        fbuild = fb.Builder(fb.Pool(adj), p_sz, seed=a.seed_field + N, uniform=False)
-        field, ffails = _build_set(fbuild, N)
+        field = fs.build_field(
+            slate.entities, params, N, dk_mean, n_med=a.medium,
+            chalk_sensitivity=a.chalk_sensitivity, stack_tilt=a.stack_tilt,
+            sharp_frac=a.sharp_frac, overbuild=a.overbuild,
+            seed=a.seed_field + N, own_uncertainty=a.own_uncertainty)
+        beta = fs.beta_for_size(N, a.medium, a.chalk_sensitivity)
         fb.lineups_to_df(field).to_csv(os.path.join(a.outdir, f"field_{N}.csv"), index=False)
-        field_mat = contest_sim.score_matrix(field, sim.dk, a.n_sims)
+        field_mat = contest_sim.score_matrix(field, dkp, a.n_sims)
         field_mat_by_size[N] = field_mat
         wins, t10, t100, avg = contest_sim.run_contest(field_mat, cand_mat, a.n_sims, N)
         res = cand_df.copy()
@@ -136,7 +183,7 @@ def main():
                               ascending=[False, False, False, True])
         res.to_csv(os.path.join(a.outdir, f"candidate_results_{N}.csv"), index=False)
         results_by_size[N] = res
-        print(f"[field {N:>6}] beta {beta:.2f}  fails {ffails}  "
+        print(f"[field {N:>6}] beta {beta:.2f}  built {len(field)}  "
               f"best Win% {res['Win%'].max():.2f}  best Top100% {res['Top100%'].max():.1f}")
 
     # ---- optional portfolio selection / DK upload ----

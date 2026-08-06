@@ -116,8 +116,10 @@ DK points [N_SIMS]}` plus per-stat means for the player table. Optional Vegas
 | `contest_ingest.py` | parse DK NFL standings CSVs | new (analog of `contest_review.parse_contest_csv`) |
 | `learn_field.py` | derive `field_params_nfl.json` from standings | new (analog of the MLB field-params derivation) |
 | `sim_engine.py` | correlated player sim → DK points | new (analog of `sim_proj.py`) |
-| `field_builder.py` | QB-centric field/candidate lineup builder | new (analog of `mlb_lineup_builder.py`) |
-| `field_simulator.py` | contest-size chalk/tilt model | ported (`normalize_to_slots`, `beta_for_size`, `adjust_ownership`, `tilt_structures`) |
+| `field_builder.py` | QB-centric field/candidate lineup builder (+ candidate upside/stack-tilt/bring-back controls) | new (analog of `mlb_lineup_builder.py`) |
+| `field_simulator.py` | contest-size chalk/tilt model + realistic-field build (`build_field`) | ported (`normalize_to_slots`, `beta_for_size`, `adjust_ownership`, `tilt_structures`) |
+| `stack_signal.py` | stack-ownership ceiling bump on the sim scores | ported from `DFSSimsFull/stack_signal.py` |
+| `ownership_model.py` | ownership-uncertainty resampling for the field | ported (subset of `DFSSimsFull/ownership_model.py`) |
 | `contest_sim.py` | `score_matrix` + `run_contest` | ported from `stage_d.py` |
 | `portfolio.py` | diversity-aware selection (NFL stack semantics) | adapted from `DFSSimsFull/portfolio.py` |
 | `portfolio_ev.py` | payout curve + concave-utility EV selection | verbatim from `DFSSimsFull/portfolio_ev.py` |
@@ -139,8 +141,42 @@ Outputs land in `out/`:
 * `candidates.csv`, `field_<N>.csv`, `candidate_results_<N>.csv`.
 * `DK_upload_<N>.csv` — ranked or EV-optimal export set.
 
-Everything defaults to reproducing a simple baseline (no jitter, caps off, EV
-off) — every diversity/EV lever is additive, matching the MLB engine's discipline.
+Every diversity/EV lever is additive (caps off, EV off by default), matching the
+MLB engine's discipline.
+
+### Field realism & candidate sharpness (ported from the MLB engine)
+
+A pure ownership-imitation field is too soft — it hands a no-skill lineup a
+positive edge, which is impossible. Four levers, all tunable on the CLI and in
+the app's *Field realism & candidate sharpness* panel, close that gap:
+
+* **Sharp/chalk field mix + overbuild** (`--sharp-frac`, `--overbuild`): a share
+  of the field is built sharp (bigger stacks, ceiling-weighted players,
+  bring-backs) on the ownership base; the field is overbuilt and trimmed to the
+  highest-projection lineups, so you face the lineups people *submit*, not raw
+  draws.
+* **Candidate sharpness** (`--cand-stack-strength`, `--cand-bringback`,
+  `--no-cand-upside`): candidates lean toward bigger QB stacks, force more
+  bring-backs, and weight skill/FLEX picks by sim ceiling (p90) rather than
+  ownership.
+* **Stack-ownership ceiling signal** (`--stack-boost`): popular offenses get a
+  small bump to their high-end sims (tied to projected stack ownership), applied
+  to both the field and candidates so it's a coherent re-weighting of reality.
+* **Ownership uncertainty** (`--own-uncertainty`): the field mixes over fresh
+  ownership draws instead of one point estimate.
+
+### Learned field weights
+
+`learn_field.py` now builds a name→team crosswalk (`player_names.csv` ⋈
+`projections.csv`) and learns the QB-stack-size distribution from
+**fully-resolved** real standings lineups (unbiased per lineup), in addition to
+the FLEX mix / ownership / duplication it already reported. On the shipped
+standings this moved `stack_sizes` off the prior to a data-derived
+`[0:8%, 1:34%, 2:50%, 3:7%, 4:0.5%]` (the 2-man QB stack is the modal build).
+Bring-back / DST-vs-own-stack stay on documented priors — labelling an opponent
+bring-back needs each standings slate's schedule, which the files don't carry;
+the learned secondary-cluster distribution is recorded as a corroborating
+diagnostic.
 
 ## Not in this pass (follow-up)
 

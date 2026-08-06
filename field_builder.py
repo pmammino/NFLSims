@@ -55,6 +55,27 @@ def load_params(path="field_params_nfl.json"):
     return DEFAULT_PARAMS
 
 
+def candidate_stack_sizes(stack_sizes, strength=0.0):
+    """Reshape the QB-stack-size distribution toward BIGGER primary stacks for
+    our candidate lineups — the NFL analog of
+    ``mlb_lineup_builder.candidate_stack_structures``.
+
+    The field builder samples the empirically-observed distribution (modal 2-man
+    stack) because it models the crowd. Our own lineups should lean bigger: the
+    win region skews toward the full QB + 2/3 pass-catcher game stacks. Each
+    size's weight is multiplied by ``exp(strength * (k - 2))`` — centered on the
+    modal k=2, so 3- and 4-stacks get boosted, k=2 is unchanged, and bare/1-man
+    QBs are suppressed — then renormalized.
+
+    ``strength = 0`` returns the input distribution unchanged (just renormalized),
+    so the default reproduces field-shaped behaviour exactly. ``stack_sizes`` is
+    ``[[k, weight], ...]``; returns a new list of the same form."""
+    out = [[k, max(float(w), 1e-12) * float(np.exp(strength * (k - 2)))]
+           for k, w in stack_sizes]
+    tot = sum(w for _, w in out)
+    return [[k, w / tot] for k, w in out]
+
+
 # --------------------------------------------------------------------------- #
 class Pool:
     """Indexes the slate's playable entities for weighted lineup construction."""
@@ -63,10 +84,14 @@ class Pool:
         # entities: list of dicts with key, pos, team, opp, salary, own
         self.rows = []
         for e in entities:
+            own = max(float(e.get("own", 0.0)), 0.001)
             self.rows.append({
                 "key": e["key"], "pos": e["pos"], "team": e.get("team", ""),
                 "opp": e.get("opp", ""), "salary": int(e["salary"]),
-                "own": max(float(e.get("own", 0.0)), 0.001),
+                "own": own,
+                # optional ceiling/upside weight for candidate player selection
+                # (e.g. sim p90); falls back to ownership when absent.
+                "up": max(float(e.get("up", own)), 1e-9),
             })
         self.by_pos = defaultdict(list)
         self.qbs = []
@@ -97,26 +122,43 @@ def wchoice(rng, items, weights, jitter=0.0):
 
 class Builder:
     def __init__(self, pool, params, seed=None, uniform=False,
-                 team_weights=None, jitter=0.0):
+                 team_weights=None, jitter=0.0, use_upside=False,
+                 bringback_prob=None):
         self.pool = pool
         self.rng = np.random.default_rng(seed)
         self.uniform = uniform
         self.team_weights = team_weights
         self.jitter = float(jitter)
+        # ---- candidate upside controls (default OFF = field imitation) ----
+        # use_upside: weight INDIVIDUAL player picks (stack mates, bring-back,
+        #   fills, FLEX) by the pool's ceiling column ("up", e.g. sim p90) instead
+        #   of ownership, so non-anchor spots are elite-upside players rather than
+        #   chalk/cheap filler. QB/DST/stack-TEAM choice is unaffected (still
+        #   uniform or ownership/Vegas weighted).
+        # bringback_prob: chance to FORCE at least one bring-back (a skill player
+        #   from the QB's opponent) on top of the sampled bring-back count, so a
+        #   candidate carries the primary + bring-back game correlation more often
+        #   than the field does. None => inherit the field's sampled rate only.
+        self.use_upside = bool(use_upside)
+        self.bringback_prob = (None if bringback_prob is None
+                               else float(min(max(bringback_prob, 0.0), 1.0)))
         self.stack_k = _dist(params["stack_sizes"], self.rng)
         self.bringback = _dist(params["bringback"], self.rng)
         self.flex_pos = _dist(params["flex_pos"], self.rng)
         self.rules = params.get("rules", DEFAULT_PARAMS["rules"])
 
-    # ---- weighted draws honoring uniform / team_weights / jitter ---- #
+    # ---- weighted draws honoring uniform / team_weights / upside / jitter ---- #
     def _w(self, rows, team_weight=False):
-        if self.uniform:
-            base = [1.0 for _ in rows]
-        elif team_weight and self.team_weights is not None:
-            base = [max(self.team_weights.get(r["team"], 1e-6), 1e-6) for r in rows]
-        else:
-            base = [r["own"] for r in rows]
-        return base
+        if team_weight:
+            # QB / DST / stack-team selection
+            if self.team_weights is not None:
+                return [max(self.team_weights.get(r["team"], 1e-6), 1e-6)
+                        for r in rows]
+            return [1.0 for _ in rows] if self.uniform else [r["own"] for r in rows]
+        # individual player selection (stack mates, bring-back, fills, FLEX)
+        if self.use_upside:
+            return [r["up"] for r in rows]
+        return [1.0 for _ in rows] if self.uniform else [r["own"] for r in rows]
 
     def _pick(self, rows, team_weight=False):
         return wchoice(self.rng, rows, self._w(rows, team_weight), self.jitter)
@@ -178,6 +220,11 @@ class Builder:
 
         # ---- bring-back from the QB's opponent ----
         b = self.bringback() if k >= 1 else 0
+        # candidate control: force >=1 bring-back with prob `bringback_prob` so
+        # the primary + bring-back game stack shows up more than in the field.
+        if (self.bringback_prob is not None and k >= 1 and qb_opp
+                and rng.random() < self.bringback_prob):
+            b = max(b, 1)
         if b and qb_opp:
             opp_skill = [r for r in pool.team_skill.get(qb_opp, [])
                          if r["key"] not in used]

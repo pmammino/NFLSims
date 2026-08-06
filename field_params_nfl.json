@@ -2,23 +2,23 @@
   "stack_sizes": [
     [
       0,
-      0.15
+      0.0802
     ],
     [
       1,
-      0.33
+      0.3424
     ],
     [
       2,
-      0.37
+      0.5014
     ],
     [
       3,
-      0.13
+      0.0707
     ],
     [
       4,
-      0.02
+      0.0054
     ]
   ],
   "bringback": [
@@ -75,7 +75,47 @@
       ]
     ],
     "flex_pos_source": "standings",
-    "stack_source": "prior (name-only standings lack team; supply a name->team crosswalk to learn stacks)",
+    "stack_source": "standings (736 fully-resolved lineups via projections+player_names crosswalk)",
+    "stack_sizes_learned": [
+      [
+        0,
+        0.0802
+      ],
+      [
+        1,
+        0.3424
+      ],
+      [
+        2,
+        0.5014
+      ],
+      [
+        3,
+        0.0707
+      ],
+      [
+        4,
+        0.0054
+      ]
+    ],
+    "stack_resolution": {
+      "crosswalk_size": 850,
+      "n_entries": 7977,
+      "n_fully_resolved": 736,
+      "primary_counts": {
+        "0": 59,
+        "1": 252,
+        "2": 369,
+        "3": 52,
+        "4": 4
+      }
+    },
+    "secondary_cluster_dist": {
+      "1": 0.5679,
+      "2": 0.4185,
+      "3": 0.0136
+    },
+    "bringback_source": "prior (needs each slate's schedule to label the QB's opponent; secondary_cluster_dist corroborates)",
     "ownership": {
       "contest-standings-185025845.csv": {
         "n_players": 197,

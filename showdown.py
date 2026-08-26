@@ -509,6 +509,51 @@ def lineups_to_df(lineups):
     return pd.DataFrame(rows)
 
 
+def scored_pool(projections="projections.csv", ownership="ownership.csv",
+                schedule="schedule.csv", names="player_names.csv",
+                n_sims=8000, seed=20260709):
+    """Ingest a single-game Showdown slate and run the correlated sim.
+
+    Shared front half of both generator scripts: build the Showdown slate, run
+    ``sim_engine.simulate``, and attach a ceiling proxy (sim p90) to every entity
+    as ``up`` (drives the ownership split and the candidate ceiling weighting).
+    Returns ``(slate, sim, dk_mean)`` where ``dk_mean`` is the per-entity mean DK
+    points used to rank the field's overbuild."""
+    import nfl_ingest
+    import sim_engine
+    slate = nfl_ingest.build_slate(projections=projections, ownership=ownership,
+                                   schedule=schedule, names=names,
+                                   slate_type="showdown")
+    sim = sim_engine.simulate(slate, n_sims=n_sims, seed=seed)
+    dk_mean = {k: float(v.mean()) for k, v in sim.dk.items()}
+    for e in slate.entities:
+        arr = sim.dk.get(e["key"])
+        e["up"] = (float(np.percentile(arr, 90)) if arr is not None
+                   else max(float(e.get("own", 0.0)), 1e-3))
+    return slate, sim, dk_mean
+
+
+def named_lineups_df(lineups, slate, dk_mean=None):
+    """A human-readable lineup table: each slot cell is ``Name (POS TEAM)``.
+
+    Adds Salary, CaptainTeam, team Split, and (if ``dk_mean`` given) the lineup's
+    mean projection (Captain at 1.5x). The Captain is the CPT column."""
+    import pandas as pd
+    meta = {e["key"]: e for e in slate.entities}
+    rows = []
+    for i, lu in enumerate(lineups, 1):
+        row = {"Lineup": i, "Salary": lu["salary"],
+               "CaptainTeam": lu.get("cap_team", ""), "Split": lu.get("split", "")}
+        if dk_mean is not None:
+            row["Proj"] = round(lineup_proj(lu, dk_mean), 1)
+        for col, p in zip(SLOT_COLS, lu["players"]):
+            e = meta.get(p["key"], {})
+            nm = e.get("name", p["key"])
+            row[col] = f"{nm} ({e.get('pos', '?')} {p.get('team', '')})"
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def dk_upload(chosen_rows, slate, cols=None):
     """Build a DK-importable Showdown upload (CPT + 5 FLEX) from selected rows.
 

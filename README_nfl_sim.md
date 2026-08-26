@@ -95,6 +95,21 @@ is the specially-capped slot (`dst_cap` is reused as the Captain-exposure cap),
 the `CPT,FLEX,FLEX,FLEX,FLEX,FLEX` header mapping the Captain cell to its Captain
 contest id.
 
+**Seeing the two flows on their own.** Two standalone scripts run each Showdown
+build in isolation, write a name-annotated CSV, and print a summary (ownership
+split, team splits, captain distribution, stack/bring-back rates):
+
+```bash
+# ownership-aware opponent field
+python3 gen_showdown_field.py      --ownership ownership.csv --n 20000 --out out/showdown_field.csv
+# ownership-blind, correlation-driven candidates (the lineups you'd enter)
+python3 gen_showdown_candidates.py --ownership ownership.csv --n 10000 --out out/showdown_candidates.csv
+```
+
+Both take a single-game slate's files; `--help` lists the knobs (chalk/sharp/
+overbuild for the field; QB-stack / bring-back / captain-skill probabilities for
+the candidates).
+
 ## Data model (the four input files)
 
 * **`projections.csv`** — one row per `PlayerID` per `Split` (`C`=ceiling≈75th,

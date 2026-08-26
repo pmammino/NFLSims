@@ -558,16 +558,24 @@ if __name__ == "__main__":
 
     dk_mean = {e["key"]: e["up"] for e in ents}
 
-    # ownership-aware field: every lineup 1 CPT + 5 FLEX, under cap, both slots ok
+    def _no_dupes(lus):
+        """No lineup repeats a player or puts the Captain in a FLEX slot."""
+        for lu in lus:
+            keys = [p["key"] for p in lu["players"]]
+            assert len(keys) == 6 and len(set(keys)) == 6, keys
+            assert lu["captain_key"] not in keys[1:], lu["captain_key"]
+
+    # ownership-aware field: every lineup 1 CPT + 5 FLEX, under cap, no dupes
     field = build_field(ents, 500, dk_mean, seed=1)
-    assert field and all(len(lu["players"]) == 6 for lu in field)
-    assert all(lu["salary"] <= SALARY_CAP for lu in field)
+    assert field and all(lu["salary"] <= SALARY_CAP for lu in field)
     assert all(lu["captain_key"] == lu["players"][0]["key"] for lu in field)
+    _no_dupes(field)
 
     # ownership-blind candidates: both teams present (no 6-0), QB stacked often
     cands = build_candidates(ents, 500, seed=2)
     assert cands and all(len(set(p["team"] for p in lu["players"])) == 2
                          for lu in cands), "candidate had a one-sided lineup"
+    _no_dupes(cands)
 
     def has_qb_stack(lu):
         for p in lu["players"]:

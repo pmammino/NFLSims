@@ -18,6 +18,15 @@ The app reads the slate straight from the repo files: `projections.csv`,
 `ownership.csv`, `schedule.csv`, and the learned `field_params_nfl.json`
 (regenerate with `python3 learn_field.py`).
 
+**Classic vs Showdown.** A *Slate format* toggle at the top switches between DK
+Classic (9 slots, the week's games — the default) and DK Showdown (one game,
+1 Captain @1.5× + 5 FLEX). For Showdown, load a single-game `ownership.csv` /
+`projections.csv`; the field is built ownership-aware (Captain vs FLEX ownership
+split from the one overall-ownership feed) and the candidate set is
+ownership-blind with single-game stacking/correlation rules. See the "Showdown"
+section of `README_nfl_sim.md` for the model. Everything downstream — Players,
+Results, Export, and the DK upload (`CPT,FLEX,…`) — follows the toggle.
+
 > **Deploying (Streamlit Community Cloud):** `requirements.txt` pins
 > `streamlit>=1.49` — the app uses the `width="stretch"` layout API, and an
 > older Streamlit raises `TypeError: 'str' object cannot be interpreted as an

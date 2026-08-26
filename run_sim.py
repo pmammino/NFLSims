@@ -35,6 +35,7 @@ import exports
 import portfolio
 import portfolio_ev as pev
 import stack_signal
+import showdown as sd
 
 
 def _build_set(builder, n, cap_mult=40):
@@ -53,6 +54,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--n-sims", type=int, default=10000)
+    ap.add_argument("--slate-type", choices=["classic", "showdown"],
+                    default="classic",
+                    help="DK contest format: 9-slot Classic (default) or "
+                         "single-game Showdown (1 CPT @1.5x + 5 FLEX)")
     ap.add_argument("--seed", type=int, default=20260709)
     ap.add_argument("--contest-sizes", nargs="+", type=int, default=[1000, 6000, 20000])
     ap.add_argument("--num-candidates", type=int, default=10000)
@@ -97,9 +102,13 @@ def main():
 
     os.makedirs(a.outdir, exist_ok=True)
 
+    showdown = (a.slate_type == "showdown")
+
     # ---- ingest + field params (learn from standings if not yet built) ----
-    slate = nfl_ingest.build_slate()
-    if not os.path.exists(a.params):
+    slate = nfl_ingest.build_slate(slate_type=a.slate_type)
+    # Classic learns a QB-stack grammar from standings; Showdown builds off
+    # single-game construction rules and the ownership split, so it needs none.
+    if not showdown and not os.path.exists(a.params):
         import glob
         import learn_field
         standings = sorted(glob.glob("contest-standings-*.csv"))
@@ -142,17 +151,26 @@ def main():
         e["up"] = float(np.percentile(arr, 90)) if arr is not None else \
             max(float(e.get("own", 0.0)), 1e-3)
 
-    # ---- candidate set (ownership-blind teams, ceiling-weighted players,
-    #      bigger stacks, more bring-backs — the sharp posture) ----
-    cparams = dict(params)
-    cparams["stack_sizes"] = fb.candidate_stack_sizes(
-        params["stack_sizes"], a.cand_stack_strength)
-    cpool = fb.Pool(slate.entities)
-    cb = fb.Builder(cpool, cparams, seed=a.seed_candidates, uniform=True,
-                    jitter=a.jitter, use_upside=a.cand_upside,
-                    bringback_prob=a.cand_bringback)
-    cands, cfails = _build_set(cb, a.num_candidates)
-    cand_df = fb.lineups_to_df(cands)
+    # ---- candidate set (ownership-blind, ceiling-weighted, correlation-aware) ----
+    if showdown:
+        # single-game smart rules: Captain a ceiling player, keep the QB with a
+        # pass-catcher, force a bring-back; ownership plays no part.
+        cands = sd.build_candidates(slate.entities, a.num_candidates,
+                                    seed=a.seed_candidates, jitter=a.jitter)
+        cfails = 0
+        cand_df = sd.lineups_to_df(cands)
+    else:
+        # Classic: ownership-blind teams, ceiling-weighted players, bigger QB
+        # stacks, more bring-backs — the sharp posture.
+        cparams = dict(params)
+        cparams["stack_sizes"] = fb.candidate_stack_sizes(
+            params["stack_sizes"], a.cand_stack_strength)
+        cpool = fb.Pool(slate.entities)
+        cb = fb.Builder(cpool, cparams, seed=a.seed_candidates, uniform=True,
+                        jitter=a.jitter, use_upside=a.cand_upside,
+                        bringback_prob=a.cand_bringback)
+        cands, cfails = _build_set(cb, a.num_candidates)
+        cand_df = fb.lineups_to_df(cands)
     cand_df.to_csv(os.path.join(a.outdir, "candidates.csv"), index=False)
     cand_mat = contest_sim.score_matrix(cands, dkp, a.n_sims)
     print(f"candidates: {len(cands)} built ({cfails} fails), scored")
@@ -160,13 +178,21 @@ def main():
     # ---- field per contest size + contest scoring ----
     results_by_size, field_mat_by_size = {}, {}
     for N in a.contest_sizes:
-        field = fs.build_field(
-            slate.entities, params, N, dk_mean, n_med=a.medium,
-            chalk_sensitivity=a.chalk_sensitivity, stack_tilt=a.stack_tilt,
-            sharp_frac=a.sharp_frac, overbuild=a.overbuild,
-            seed=a.seed_field + N, own_uncertainty=a.own_uncertainty)
+        if showdown:
+            field = sd.build_field(
+                slate.entities, N, dk_mean, n_med=a.medium,
+                chalk_sensitivity=a.chalk_sensitivity, sharp_frac=a.sharp_frac,
+                overbuild=a.overbuild, seed=a.seed_field + N)
+            field_df = sd.lineups_to_df(field)
+        else:
+            field = fs.build_field(
+                slate.entities, params, N, dk_mean, n_med=a.medium,
+                chalk_sensitivity=a.chalk_sensitivity, stack_tilt=a.stack_tilt,
+                sharp_frac=a.sharp_frac, overbuild=a.overbuild,
+                seed=a.seed_field + N, own_uncertainty=a.own_uncertainty)
+            field_df = fb.lineups_to_df(field)
         beta = fs.beta_for_size(N, a.medium, a.chalk_sensitivity)
-        fb.lineups_to_df(field).to_csv(os.path.join(a.outdir, f"field_{N}.csv"), index=False)
+        field_df.to_csv(os.path.join(a.outdir, f"field_{N}.csv"), index=False)
         field_mat = contest_sim.score_matrix(field, dkp, a.n_sims)
         field_mat_by_size[N] = field_mat
         wins, t10, t100, avg = contest_sim.run_contest(field_mat, cand_mat, a.n_sims, N)
@@ -198,6 +224,8 @@ def main():
 
 
 def _select_and_upload(a, slate, cands, cand_mat, res, field_mat, size):
+    showdown = (a.slate_type == "showdown")
+    cols = sd.SLOT_COLS if showdown else portfolio.SLOT_COLS
     if a.objective == "ev":
         prize = pev.make_payout_curve(size, a.entry_fee)
         cut_places = pev.field_place_cutpoints(size)
@@ -208,9 +236,9 @@ def _select_and_upload(a, slate, cands, cand_mat, res, field_mat, size):
         cand_scores = cand_mat[:, order]
         pay = pev.candidate_payout_matrix(cand_scores, field_cut, cut_places, prize)
         chosen, info, W = portfolio.select_portfolio_ev(
-            res, a.select, pay, pev.utility(a.utility),
+            res, a.select, pay, pev.utility(a.utility), cols=cols,
             skill_cap=a.skill_cap, dst_cap=a.dst_cap, team_cap=a.team_cap,
-            max_overlap=a.max_overlap)
+            max_overlap=a.max_overlap, slate_type=a.slate_type)
         n = max(info["chosen"], 1)
         print(f"EV export: {info['chosen']} lineups  exp ${info['exp_return']:.0f} total "
               f"(${info['exp_return']/n:.2f}/entry vs ${a.entry_fee:.0f})  "
@@ -220,11 +248,12 @@ def _select_and_upload(a, slate, cands, cand_mat, res, field_mat, size):
                   "top10": ["Top10", "Top100", "Wins"],
                   "top100": ["Top100", "Top10", "Wins"]}[a.objective]
         chosen, info = portfolio.select_portfolio(
-            res, a.select, keymap, skill_cap=a.skill_cap, dst_cap=a.dst_cap,
-            team_cap=a.team_cap, max_overlap=a.max_overlap)
+            res, a.select, keymap, cols=cols, skill_cap=a.skill_cap,
+            dst_cap=a.dst_cap, team_cap=a.team_cap, max_overlap=a.max_overlap,
+            slate_type=a.slate_type)
         print(f"ranked export ({a.objective}): {info['chosen']} lineups  "
               f"max team {info['max_team']}  distinct stacks {info['distinct_cores']}")
-    up = exports.dk_upload(chosen, slate)
+    up = sd.dk_upload(chosen, slate) if showdown else exports.dk_upload(chosen, slate)
     path = os.path.join(a.outdir, f"DK_upload_{size}.csv")
     up.to_csv(path, index=False)
     print(f"  wrote {path}  (unmet mins: {info['unmet_mins']})")

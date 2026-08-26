@@ -51,6 +51,16 @@ DST_SAFETY = 2.0
 DST_BLOCK = 2.0
 DST_TD = 6.0
 
+# kicker (used by DK **Showdown** slates, which roster a K)
+KICK_XP = 1.0
+KICK_FG_0_39 = 3.0        # field goal 0-39 yards
+KICK_FG_40_49 = 4.0       # field goal 40-49 yards
+KICK_FG_50_PLUS = 5.0     # field goal 50+ yards
+
+# DK **Showdown** Captain multiplier: the CPT scores 1.5x points (and costs 1.5x
+# salary). Applied at lineup scoring / salary time, not in these per-stat rules.
+CAPTAIN_MULT = 1.5
+
 # points-allowed tiers as (upper_bound_inclusive, points); last is the 35+ floor
 PA_TIERS = [(0, 10.0), (6, 7.0), (13, 4.0), (20, 1.0), (27, 0.0), (34, -1.0)]
 PA_FLOOR = -4.0
@@ -116,6 +126,28 @@ def score_dst(s, points_allowed=None):
     return pts
 
 
+def score_kicker(s):
+    """DK points for a kicker from a stat dict (Showdown slates roster a K).
+
+    Recognized keys (all optional, default 0): xp_made (extra points), and the
+    made-field-goal counts bucketed by distance -- fg_0_39, fg_40_49, fg_50_plus.
+    DK does not penalize missed field goals, so only makes are scored. Accepts
+    scalars or numpy arrays.
+    """
+    g = lambda k: np.asarray(s.get(k, 0.0), dtype=float)
+    return (
+        KICK_XP * g("xp_made")
+        + KICK_FG_0_39 * g("fg_0_39")
+        + KICK_FG_40_49 * g("fg_40_49")
+        + KICK_FG_50_PLUS * g("fg_50_plus")
+    )
+
+
+def captain_points(pts):
+    """Scale a base DK point total (scalar/array) to Captain scoring (1.5x)."""
+    return CAPTAIN_MULT * np.asarray(pts, dtype=float)
+
+
 # projections.csv column -> offensive stat key (summing the granular TD buckets)
 OFF_TD_PASS_COLS = ["offPassTD9", "offPassTD19", "offPassTD29", "offPassTD39",
                     "offPassTD49", "offPassTD50"]
@@ -139,4 +171,9 @@ if __name__ == "__main__":
     dst = score_dst({"sacks": 3, "ints": 1, "fumble_rec": 1, "def_tds": 1},
                     points_allowed=10)
     assert abs(float(dst) - 17.0) < 1e-9, dst
+    # kicker: 2 XP + 1 short FG + 1 mid FG + 1 long FG: 2 + 3 + 4 + 5 = 14
+    k = score_kicker({"xp_made": 2, "fg_0_39": 1, "fg_40_49": 1, "fg_50_plus": 1})
+    assert abs(float(k) - 14.0) < 1e-9, k
+    # captain scaling: a 20-pt line captains to 30
+    assert abs(float(captain_points(20.0)) - 30.0) < 1e-9, captain_points(20.0)
     print("dk_scoring.py self-test passed")

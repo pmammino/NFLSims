@@ -43,6 +43,58 @@ schedule.csv  ──┘            │
   0.1/yd + 6/TD + 3 @100yd; −1 fumble lost; +2 two-point; return/recovery TD +6;
   DST sacks/INT/fumble-rec/TD/safety/block + points-allowed tiers).
 
+## Showdown (single-game) support
+
+Everything above is DK **Classic**. The same engine also runs DK **Showdown**
+(one game) via `--slate-type showdown` on `run_sim.py`, or the *Slate format*
+toggle in the app. Classic is the default; nothing about it changes.
+
+**Roster.** 1 `CPT` (Captain) + 5 `FLEX`, six players, all from the one game;
+any position (QB/RB/WR/TE/K/DST) fills any slot. `$50,000` cap. The Captain
+scores **1.5×** DK points and costs **1.5×** salary — the points multiplier is
+applied in `contest_sim.score_matrix` off each lineup's `captain_key`; the salary
+comes from each entity's `cpt_salary`. Kickers are scored (`dk_scoring.score_kicker`:
+XP +1, FG 0-39 +3, 40-49 +4, 50+ +5).
+
+**Data.** Feed the same four files, scoped to the single game. `ownership.csv`
+carries **one row per player** — the player's **overall** rostered ownership
+across both slots. If the file also carries explicit Captain-priced rows
+(a `Position`/`Roster Position` of `CPT`), the ingest reads their exact salary
+and DK contest id; otherwise it derives Captain salary = round(1.5× FLEX) and
+reuses the base contest id (swap in a CPT-id crosswalk later if your contest
+needs distinct Captain ids to import).
+
+**Ownership split** (`showdown.split_ownership`). Six roster spots per entry, so
+across the field overall ownership sums to 600%, of which the Captain slot is
+100% and FLEX is 500%. Each player's overall exposure `O_i` is split into a
+Captain-slot rate and a FLEX-slot rate via a per-player Captain *share*
+(`cpt_i = s_i·O_i`, so `cpt_i ≤ O_i`), with `s_i` tilted toward ceiling so the
+scarce Captain spot skews to high-upside players. Captain mass sums to exactly 1,
+FLEX to exactly 5.
+
+**Two builders** (`showdown.py`):
+
+* **Ownership-aware field** (`FieldBuilder` / `build_field`) — draws the Captain
+  ∝ Captain-slot ownership and the five FLEX ∝ FLEX-slot ownership, i.e. the
+  crowd you actually face. It keeps the Classic realism guards: chalk temperature
+  for the field size, a sharp fraction drawn from the smart candidate builder so
+  the field isn't a too-soft pure-ownership draw, and overbuild-and-trim to the
+  top lineups by projection (Captain at 1.5×).
+* **Ownership-blind candidates** (`CandidateBuilder` / `build_candidates`) —
+  ignores ownership entirely and builds off single-game construction rules: pick
+  a team to build around, Captain a ceiling player, keep the QB with ≥1
+  pass-catcher (the intra-team passing stack), force a bring-back from the other
+  team (winning single-game lineups carry both sides — team split is sampled from
+  balanced 3-3 / onslaught 4-2 / 2-4 / rare 5-1, never 6-0), guard against
+  rostering a DST behind a big opposing stack, and weight every remaining pick by
+  simulated ceiling.
+
+Portfolio selection, EV, and the DK upload are all Showdown-aware: the Captain
+is the specially-capped slot (`dst_cap` is reused as the Captain-exposure cap),
+`core_cap` diversifies which player you Captain, and `showdown.dk_upload` writes
+the `CPT,FLEX,FLEX,FLEX,FLEX,FLEX` header mapping the Captain cell to its Captain
+contest id.
+
 ## Data model (the four input files)
 
 * **`projections.csv`** — one row per `PlayerID` per `Split` (`C`=ceiling≈75th,
@@ -120,7 +172,8 @@ DK points [N_SIMS]}` plus per-stat means for the player table. Optional Vegas
 | `field_simulator.py` | contest-size chalk/tilt model + realistic-field build (`build_field`) | ported (`normalize_to_slots`, `beta_for_size`, `adjust_ownership`, `tilt_structures`) |
 | `stack_signal.py` | stack-ownership ceiling bump on the sim scores | ported from `DFSSimsFull/stack_signal.py` |
 | `ownership_model.py` | ownership-uncertainty resampling for the field | ported (subset of `DFSSimsFull/ownership_model.py`) |
-| `contest_sim.py` | `score_matrix` + `run_contest` | ported from `stage_d.py` |
+| `contest_sim.py` | `score_matrix` (+ Captain 1.5× via `captain_key`) + `run_contest` | ported from `stage_d.py` |
+| `showdown.py` | Showdown ownership split + ownership-aware field + ownership-blind candidate builders + DK upload | new |
 | `portfolio.py` | diversity-aware selection (NFL stack semantics) | adapted from `DFSSimsFull/portfolio.py` |
 | `portfolio_ev.py` | payout curve + concave-utility EV selection | verbatim from `DFSSimsFull/portfolio_ev.py` |
 | `exports.py` | player projection table + DK upload CSV | new (mirrors the MLB player export) |
@@ -131,6 +184,10 @@ DK points [N_SIMS]}` plus per-stat means for the player table. Optional Vegas
 ```bash
 python3 run_sim.py --n-sims 10000 --contest-sizes 1000 6000 20000 \
         --num-candidates 10000 --select 20 --objective ev
+
+# Showdown (single game): same flags + --slate-type showdown
+python3 run_sim.py --slate-type showdown --n-sims 10000 \
+        --contest-sizes 1000 6000 --num-candidates 10000 --select 20 --objective ev
 ```
 
 Outputs land in `out/`:

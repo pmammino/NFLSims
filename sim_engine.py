@@ -130,7 +130,14 @@ def simulate(slate, n_sims=10000, seed=20260709, total_scale=None):
     by_team = defaultdict(list)
     loose = []                       # matched players with no team, or unmatched
     for p in slate.players:
-        (by_team[p["team"]].append(p) if p["team"] else loose.append(p))
+        # Kickers (Showdown only) carry an fp triple rather than an allocated
+        # stat line, so they score off the standalone marginal path below (still
+        # correlated to their team's offense via the team latent), not the
+        # QB/receiver allocation. Everyone else with a team stacks by team.
+        if p["team"] and p["pos"] != "K":
+            by_team[p["team"]].append(p)
+        else:
+            loose.append(p)
 
     team_off_sum = defaultdict(lambda: np.zeros(N))
 

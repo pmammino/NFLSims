@@ -25,6 +25,12 @@ import numpy as np
 SLOT_COLS = ["QB", "RB1", "RB2", "WR1", "WR2", "WR3", "TE", "FLEX", "DST"]
 DST_SLOT = "DST"
 
+# DK Showdown: 1 Captain + 5 FLEX. The Captain slot is the specially-capped slot
+# (``dst_cap`` is reused as the Captain-exposure cap), the other five are
+# ``skill_cap``.
+SHOWDOWN_SLOT_COLS = ["CPT", "FLEX1", "FLEX2", "FLEX3", "FLEX4", "FLEX5"]
+CPT_SLOT = "CPT"
+
 
 def _split(cell):
     """'KEY (TEAM)' -> ('KEY', 'TEAM'); tolerates a missing/odd team tag."""
@@ -35,8 +41,10 @@ def _split(cell):
     return s, ""
 
 
-def lineup_features(row, cols=SLOT_COLS):
+def lineup_features(row, cols=SLOT_COLS, slate_type="classic"):
     """Pull the bits the selector reasons about out of one result row."""
+    if str(slate_type).lower() == "showdown":
+        return _features_showdown(row, cols)
     names, teams = [], []
     for c in cols:
         nm, tm = _split(row[c])
@@ -56,6 +64,32 @@ def lineup_features(row, cols=SLOT_COLS):
         "secondary": secondary,
         "pair": (primary, secondary),
         "core": (primary, core),
+    }
+
+
+def _features_showdown(row, cols=SHOWDOWN_SLOT_COLS):
+    """Showdown feature read: the Captain (cols[0]) is the anchor.
+
+      * primary   = the Captain's team (the team you leaned on)
+      * secondary = the other team when it contributes >=2 players
+      * core      = the exact Captain player (so ``core_cap`` diversifies Captains)
+    """
+    names, teams = [], []
+    for c in cols:
+        nm, tm = _split(row[c])
+        names.append(nm)
+        teams.append(tm)
+    captain = names[0] if names else ""
+    primary = teams[0] if teams else ""
+    tc = Counter(tm for tm in teams[1:] if tm and tm != primary)
+    secondary = next((t for t, n in tc.most_common() if n >= 2), "")
+    return {
+        "names": names,
+        "playerset": frozenset(names),
+        "primary": primary,
+        "secondary": secondary,
+        "pair": (primary, secondary),
+        "core": ("CPT", frozenset({captain}) if captain else frozenset()),
     }
 
 
@@ -98,14 +132,18 @@ def select_portfolio(res_df, n_select, sort_cols, *, cols=SLOT_COLS,
                      team_cap=1.0, pair_cap=1.0, core_cap=1.0,
                      max_overlap=1.0, group_of=None, group_cap=1.0,
                      player_caps=None, team_caps=None,
-                     player_mins=None, team_mins=None):
+                     player_mins=None, team_mins=None, slate_type="classic"):
     """Rank `res_df` by `sort_cols` (desc) then greedily accept lineups that keep
     every exposure cap and the pairwise-overlap ceiling satisfied. Caps are
-    fractions of `n_select` (1.0 = off). Returns (chosen_rows, info)."""
+    fractions of `n_select` (1.0 = off). Returns (chosen_rows, info).
+
+    On ``slate_type="showdown"`` the specially-capped slot is the Captain (cols[0],
+    ``dst_cap`` reused as the Captain-exposure cap)."""
     N = int(n_select)
+    showdown = str(slate_type).lower() == "showdown"
     rdf = res_df.sort_values(list(sort_cols), ascending=False).reset_index(drop=True)
     cap_n, min_n = _cap_fns(N)
-    dst_i = _dst_index(cols)
+    dst_i = 0 if showdown else _dst_index(cols)
 
     scap, dcap, tcap = cap_n(skill_cap), cap_n(dst_cap), cap_n(team_cap)
     paircap, ccap, gcap = cap_n(pair_cap), cap_n(core_cap), cap_n(group_cap)
@@ -131,7 +169,7 @@ def select_portfolio(res_df, n_select, sort_cols, *, cols=SLOT_COLS,
     expo = Counter(); teamc = Counter(); pairc = Counter()
     corec = Counter(); groupc = Counter(); dsts = set()
     chosen, chosen_sets, chosen_idx, skipped = [], [], set(), 0
-    feats = [lineup_features(rdf.iloc[i], cols) for i in range(len(rdf))]
+    feats = [lineup_features(rdf.iloc[i], cols, slate_type) for i in range(len(rdf))]
 
     def fits_maxes(f, names):
         if any(expo[n] >= player_cap_for(n, i) for i, n in enumerate(names)):
@@ -210,11 +248,16 @@ def select_portfolio_ev(res_df, n_select, pay, util, *, cols=SLOT_COLS,
                         team_cap=1.0, pair_cap=1.0, core_cap=1.0,
                         max_overlap=1.0, group_of=None, group_cap=1.0,
                         player_caps=None, team_caps=None,
-                        player_mins=None, team_mins=None, eval_sims=None):
+                        player_mins=None, team_mins=None, eval_sims=None,
+                        slate_type="classic"):
     """Greedily build the export set maximizing E[util(portfolio $ return)] under
     the same caps. `pay` is (n_sim, n_row) dollars per candidate per sim; row i
-    aligns with pay[:, i]. Returns (chosen_rows, info, W)."""
+    aligns with pay[:, i]. Returns (chosen_rows, info, W).
+
+    On ``slate_type="showdown"`` the specially-capped slot is the Captain (cols[0],
+    ``dst_cap`` reused as the Captain-exposure cap)."""
     N = int(n_select)
+    showdown = str(slate_type).lower() == "showdown"
     rdf = res_df.reset_index(drop=True)
     n_row = len(rdf)
     pay = np.asarray(pay, dtype=np.float32)
@@ -222,7 +265,7 @@ def select_portfolio_ev(res_df, n_select, pay, util, *, cols=SLOT_COLS,
         raise ValueError(f"pay has {pay.shape[1]} cols but res_df has {n_row} rows")
     n_sim = pay.shape[0]
     cap_n, min_n = _cap_fns(N)
-    dst_i = _dst_index(cols)
+    dst_i = 0 if showdown else _dst_index(cols)
 
     if eval_sims and int(eval_sims) < n_sim:
         step = max(1, n_sim // int(eval_sims))
@@ -252,7 +295,7 @@ def select_portfolio_ev(res_df, n_select, pay, util, *, cols=SLOT_COLS,
     team_minn = {tm: min(need, team_capn.get(tm, N)) for tm, need in team_minn.items()
                  if need > 0}
 
-    feats = [lineup_features(rdf.iloc[i], cols) for i in range(n_row)]
+    feats = [lineup_features(rdf.iloc[i], cols, slate_type) for i in range(n_row)]
     elig = np.ones(n_row, dtype=bool)
     if eligible is not None:
         for i in range(n_row):

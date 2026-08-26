@@ -46,6 +46,16 @@ OFF_STAT_COLS = {
     "return_tds": ["specKORetTD", "specPuntRetTD"],
 }
 
+# kicker made-field-goal / extra-point columns -> dk_scoring.score_kicker keys.
+# Made FGs are bucketed by distance in the projections; DK scores 0-39 at 3,
+# 40-49 at 4, 50+ at 5. (Used only on Showdown slates, which roster a K.)
+KICK_STAT_COLS = {
+    "xp_made": ["specXPMade"],
+    "fg_0_39": ["specFGMade19", "specFGMade29", "specFGMade39"],
+    "fg_40_49": ["specFGMade49"],
+    "fg_50_plus": ["specFGMade50", "specFGMade59", "specFGMade60"],
+}
+
 # aggregated team-DST counting stats -> projections columns (summed over defenders)
 DST_STAT_COLS = {
     "sacks": ["defSacks"],
@@ -59,6 +69,13 @@ DST_STAT_COLS = {
 }
 
 POS_OFFENSE = {"QB", "RB", "WR", "TE"}
+# Showdown slates also roster a kicker; the "skill" pool then includes K.
+POS_OFFENSE_SHOWDOWN = {"QB", "RB", "WR", "TE", "K"}
+# ownership.csv Position markers that identify a Captain-priced row (1.5x salary
+# and a distinct DK contest id) rather than a base FLEX row, if the file carries
+# them. When absent, Captain salary/id are derived from the base row.
+CAPTAIN_MARKERS = {"CPT", "CAPTAIN", "CAPTAIN (1.5X)", "MVP"}
+CAPTAIN_MULT = 1.5
 
 
 def _f(v):
@@ -156,6 +173,16 @@ def _offense_fp(splits):
     return tuple(fp)
 
 
+def _kicker_fp(splits):
+    """DK fantasy points at (F, M, C) for a kicker from its stat splits."""
+    stats = {k: _stat_triple(splits, cols) for k, cols in KICK_STAT_COLS.items()}
+    fp = []
+    for i, _ in enumerate(SPLITS):
+        stat = {k: v[i] for k, v in stats.items()}
+        fp.append(float(dk.score_kicker(stat)))
+    return tuple(fp)
+
+
 def _replacement_fp(salary):
     """A near-zero, salary-scaled marginal for pool players with no projection.
 
@@ -181,12 +208,14 @@ class Slate:
     games : {game_id: (teamA, teamB)}
     """
 
-    def __init__(self, players, dst, schedule, teams, games):
+    def __init__(self, players, dst, schedule, teams, games,
+                 slate_type="classic"):
         self.players = players
         self.dst = dst
         self.schedule = schedule
         self.teams = teams
         self.games = games
+        self.slate_type = slate_type
 
     @property
     def entities(self):
@@ -198,34 +227,95 @@ def _game_id(a, b):
     return "@".join(sorted([a, b]))
 
 
+def _row_position(r):
+    """The (upper-cased) football position marker on an ownership row."""
+    return (r.get("Position") or "").strip().upper()
+
+
+def _row_roster_slot(r):
+    """The (upper-cased) DK roster slot marker if the file carries one."""
+    return (r.get("Roster Position") or r.get("RosterPosition")
+            or r.get("RosterSlot") or "").strip().upper()
+
+
+def _is_captain_row(r):
+    """True if an ownership row is a Captain-priced duplicate (Showdown)."""
+    return (_row_position(r) in CAPTAIN_MARKERS
+            or _row_roster_slot(r) in CAPTAIN_MARKERS)
+
+
+def _captain_overrides(pool):
+    """rid -> {salary, contest_id} for any explicit Captain rows in the pool.
+
+    A DK Showdown salaries export can carry a second row per player at Captain
+    price (1.5x salary, a distinct contest id). When present we honor those exact
+    values; otherwise the Captain salary/id are derived from the base row."""
+    over = {}
+    for r in pool:
+        if _is_captain_row(r):
+            rid = r["RotoPlayerID"].strip()
+            over[rid] = {"salary": int(_f(r["Salary"])),
+                         "contest_id": r["PlayerContestID"].strip()}
+    return over
+
+
+def _attach_captain(rec, over):
+    """Add cpt_salary / cpt_contest_id to an entity for Showdown scoring/upload."""
+    o = over.get(rec.get("rid", ""))
+    if o:
+        rec["cpt_salary"] = o["salary"]
+        rec["cpt_contest_id"] = o["contest_id"]
+    else:
+        rec["cpt_salary"] = int(round(CAPTAIN_MULT * rec["salary"]))
+        rec["cpt_contest_id"] = rec.get("contest_id", "")
+
+
 def build_slate(projections="projections.csv", ownership="ownership.csv",
                 schedule="schedule.csv", dst_teams="dst_teams.csv",
-                names="player_names.csv"):
+                names="player_names.csv", slate_type="classic"):
     proj, by_team = _load_projections(projections)
     pool = _load_ownership(ownership)
     sched = _load_schedule(schedule)
     name_map = _load_names(names)
 
-    # ---- offensive players ----
+    showdown = (str(slate_type).lower() == "showdown")
+    pos_offense = POS_OFFENSE_SHOWDOWN if showdown else POS_OFFENSE
+    cpt_over = _captain_overrides(pool) if showdown else {}
+
+    def _team_of(splits):
+        row = splits.get("M", splits.get("C", next(iter(splits.values()))))
+        return row["Team"].strip()
+
+    # ---- offensive players (+ kicker on Showdown) ----
     players = []
     slate_teams = set()
     for r in pool:
-        pos = r["Position"].strip()
-        if pos not in POS_OFFENSE:
+        # skip Captain-priced duplicate rows: they are folded into the base
+        # row's cpt_salary / cpt_contest_id, not carried as separate entities.
+        if showdown and _is_captain_row(r):
+            continue
+        pos = _row_position(r)
+        if pos in ("PK", "K"):
+            pos = "K"
+        if pos not in pos_offense:
             continue
         rid = r["RotoPlayerID"].strip()
         salary = int(_f(r["Salary"]))
         own = _f(r["Ownership"])
         splits = proj.get(rid)
         matched = splits is not None
-        if matched:
-            stats = {k: _stat_triple(splits, cols) for k, cols in OFF_STAT_COLS.items()}
-            team = splits.get("M", splits.get("C", next(iter(splits.values()))))["Team"].strip()
-            fp = _offense_fp(stats)
-        else:
+        if not matched:
             stats = None
             team = ""            # unknown team for unmatched scrubs
             fp = _replacement_fp(salary)
+        elif pos == "K":
+            stats = None         # kickers score off their fp triple (no allocation)
+            team = _team_of(splits)
+            fp = _kicker_fp(splits)
+        else:
+            stats = {k: _stat_triple(splits, cols) for k, cols in OFF_STAT_COLS.items()}
+            team = _team_of(splits)
+            fp = _offense_fp(stats)
         rec = {
             "key": f"O{rid}", "rid": rid, "pid": r["PlayerID"].strip(),
             "contest_id": r["PlayerContestID"].strip(),
@@ -233,6 +323,8 @@ def build_slate(projections="projections.csv", ownership="ownership.csv",
             "pos": pos, "team": team, "salary": salary, "own": own,
             "matched": matched, "stats": stats, "fp": fp,
         }
+        if showdown:
+            _attach_captain(rec, cpt_over)
         players.append(rec)
         if team:
             slate_teams.add(team)
@@ -254,7 +346,8 @@ def build_slate(projections="projections.csv", ownership="ownership.csv",
         p["game"] = _game_id(p["team"], p["opp"]) if p["opp"] else (p["team"] or "")
 
     # ---- team DST projections (aggregate defenders) ----
-    dst_pool = [r for r in pool if r["Position"].strip() == "DST"]
+    dst_pool = [r for r in pool if _row_position(r) == "DST"
+                and not (showdown and _is_captain_row(r))]
     dst_map = _load_dst_map(dst_teams)
     dst_team_proj = {}     # team -> {stat:(F,M,C)}, count_fp
     for t in teams:
@@ -269,8 +362,11 @@ def build_slate(projections="projections.csv", ownership="ownership.csv",
         dst_team_proj[t] = {"count_stats": cs, "count_fp": tuple(cfp)}
 
     dst = _assign_dst(dst_pool, teams, dst_team_proj, dst_map, sched, opp_of)
+    if showdown:
+        for d in dst:
+            _attach_captain(d, cpt_over)
 
-    return Slate(players, dst, sched, teams, games)
+    return Slate(players, dst, sched, teams, games, slate_type=slate_type)
 
 
 def _load_dst_map(path):

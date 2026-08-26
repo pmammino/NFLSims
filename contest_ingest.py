@@ -10,16 +10,22 @@ The file interleaves two independent blocks per row:
   * right: Player, Roster Position, %Drafted, FPTS   (the realized-ownership /
            actual-score table; its rows are NOT aligned with the entries)
 
-A lineup string looks like
+A Classic lineup string looks like
     "DST Browns  FLEX Trey McBride QB Jameis Winston RB Jahmyr Gibbs ..."
-tokenized here into (slot, player) pairs.
+a Showdown one like
+    "CPT Patrick Mahomes FLEX Travis Kelce FLEX Isiah Pacheco ..."
+tokenized here into (slot, player) pairs. Showdown slots are ``CPT`` / ``FLEX``.
 """
 import csv
 import re
 from collections import namedtuple
 
+# Slot tokens across both formats: Classic (QB/RB/WR/TE/DST/FLEX) and Showdown
+# (CPT/FLEX). K is included for completeness (Showdown rosters a kicker).
+SLOT_TOKENS = ("CPT", "FLEX", "QB", "RB", "WR", "TE", "DST", "K")
 SLOT_RE = re.compile(
-    r"(QB|RB|WR|TE|DST|FLEX)\s+(.+?)(?=\s+(?:QB|RB|WR|TE|DST|FLEX)\s+|$)")
+    r"\b(" + "|".join(SLOT_TOKENS) + r")\s+(.+?)"
+    r"(?=\s+\b(?:" + "|".join(SLOT_TOKENS) + r")\s+|$)")
 
 Entry = namedtuple("Entry", "rank entry_id name points lineup")
 PlayerActual = namedtuple("PlayerActual", "player roster_pos pct_drafted fpts")

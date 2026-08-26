@@ -36,6 +36,7 @@ import exports
 import portfolio
 import portfolio_ev as pev
 import stack_signal
+import showdown as sd
 
 try:
     alt.data_transformers.disable_max_rows()
@@ -142,13 +143,14 @@ def _mtime(p):
 
 
 @st.cache_resource(show_spinner=False)
-def cached_slate(proj_m, own_m, sched_m):
-    return nfl_ingest.build_slate(PROJ_CSV, OWN_CSV, SCHED_CSV)
+def cached_slate(proj_m, own_m, sched_m, slate_type="classic"):
+    return nfl_ingest.build_slate(PROJ_CSV, OWN_CSV, SCHED_CSV,
+                                  slate_type=slate_type)
 
 
 @st.cache_resource(show_spinner=False)
-def cached_sim(n_sims, seed, proj_m, own_m, sched_m):
-    slate = cached_slate(proj_m, own_m, sched_m)
+def cached_sim(n_sims, seed, proj_m, own_m, sched_m, slate_type="classic"):
+    slate = cached_slate(proj_m, own_m, sched_m, slate_type)
     return slate, sim_engine.simulate(slate, n_sims=n_sims, seed=seed)
 
 
@@ -160,8 +162,8 @@ def cached_params(path, mtime):
 
 
 @st.cache_data(show_spinner=False)
-def cached_player_table(n_sims, seed, proj_m, own_m, sched_m):
-    slate, sim = cached_sim(n_sims, seed, proj_m, own_m, sched_m)
+def cached_player_table(n_sims, seed, proj_m, own_m, sched_m, slate_type="classic"):
+    slate, sim = cached_sim(n_sims, seed, proj_m, own_m, sched_m, slate_type)
     return exports.player_table(sim, slate)
 
 
@@ -218,12 +220,12 @@ def portfolio_return_chart(W, entry_cost):
     return (base + rule).properties(height=240)
 
 
-def stack_dist_chart(stack_counts):
+def stack_dist_chart(stack_counts, prefix="QB+", xtitle="primary stack size"):
     tot = sum(stack_counts.values()) or 1
-    df = pd.DataFrame([{"stack": f"QB+{k}", "pct": 100 * v / tot}
+    df = pd.DataFrame([{"stack": f"{prefix}{k}", "pct": 100 * v / tot}
                        for k, v in sorted(stack_counts.items())])
     return alt.Chart(df).mark_bar(color=RW_PURPLE).encode(
-        x=alt.X("stack:N", title="primary stack size", sort=None),
+        x=alt.X("stack:N", title=xtitle, sort=None),
         y=alt.Y("pct:Q", title="% of field"),
     ).properties(height=220)
 
@@ -237,7 +239,7 @@ st.markdown(
       <div class="rw-divider"></div>
       <div>
         <div class="rw-title">NFL DFS Contest Sims</div>
-        <div class="rw-eyebrow">DraftKings NFL Classic · correlated GPP simulator</div>
+        <div class="rw-eyebrow">DraftKings NFL Classic & Showdown · correlated GPP simulator</div>
       </div>
       <span class="rw-badge"><span class="dot"></span>WEEK SLATE</span>
     </div>""", unsafe_allow_html=True)
@@ -252,8 +254,18 @@ if not (os.path.exists(PROJ_CSV) and os.path.exists(OWN_CSV)):
     st.error("Missing `projections.csv` and/or `ownership.csv` in the app folder.")
     st.stop()
 
+# ---- slate format: Classic (9 slots, many games) vs Showdown (single game) ---
+sty = st.radio(
+    "Slate format", ["Classic", "Showdown"], horizontal=True, key="slate_type",
+    help="Classic = QB/RB/RB/WR/WR/WR/TE/FLEX/DST across the week's games. "
+         "Showdown = one game, 1 Captain (1.5x pts & salary) + 5 FLEX; load a "
+         "single-game ownership.csv/projections.csv.")
+SLATE_TYPE = "showdown" if sty == "Showdown" else "classic"
+SHOWDOWN = SLATE_TYPE == "showdown"
+SLOTS = sd.SLOT_COLS if SHOWDOWN else portfolio.SLOT_COLS
+
 mt = (_mtime(PROJ_CSV), _mtime(OWN_CSV), _mtime(SCHED_CSV))
-slate = cached_slate(*mt)
+slate = cached_slate(*mt, SLATE_TYPE)
 params = cached_params(PARAMS_PATH, _mtime(PARAMS_PATH))
 n_matched = sum(p["matched"] for p in slate.players)
 KEY_NAME = {e["key"]: e.get("name", e["key"]) for e in slate.entities}
@@ -385,7 +397,7 @@ with tabs[0]:
                     width="stretch")
 
     # sim is cheap; compute (cached) every run so Players is always live
-    slate, sim = cached_sim(int(n_sims), int(seed), *mt)
+    slate, sim = cached_sim(int(n_sims), int(seed), *mt, SLATE_TYPE)
     rc = sim_engine.realized_correlations(sim, slate)
     st.caption(f"sim ready · {n_sims:,} runs · realized QB–WR corr "
                f"{rc['qb_wr_same']:.2f}, WR–WR {rc['wr_wr_same']:.2f}")
@@ -413,15 +425,23 @@ with tabs[0]:
                     e["up"] = (float(np.percentile(arr, 90)) if arr is not None
                                else max(float(e.get("own", 0.0)), 1e-3))
 
-                cparams = dict(params)
-                cparams["stack_sizes"] = fb.candidate_stack_sizes(
-                    params["stack_sizes"], float(cand_stack_strength))
-                cb = fb.Builder(fb.Pool(slate.entities), cparams,
-                                seed=2025, uniform=True, jitter=float(jitter),
-                                use_upside=bool(cand_upside),
-                                bringback_prob=float(cand_bringback))
-                cands, _ = build_many(cb, int(num_candidates), "candidates")
-                cand_df = fb.lineups_to_df(cands)
+                if SHOWDOWN:
+                    # ownership-blind, correlation-aware single-game candidates
+                    cands, _ = build_many(
+                        sd.CandidateBuilder(sd.Pool(slate.entities), seed=2025,
+                                            jitter=float(jitter)),
+                        int(num_candidates), "candidates")
+                    cand_df = sd.lineups_to_df(cands)
+                else:
+                    cparams = dict(params)
+                    cparams["stack_sizes"] = fb.candidate_stack_sizes(
+                        params["stack_sizes"], float(cand_stack_strength))
+                    cb = fb.Builder(fb.Pool(slate.entities), cparams,
+                                    seed=2025, uniform=True, jitter=float(jitter),
+                                    use_upside=bool(cand_upside),
+                                    bringback_prob=float(cand_bringback))
+                    cands, _ = build_many(cb, int(num_candidates), "candidates")
+                    cand_df = fb.lineups_to_df(cands)
                 cand_mat = contest_sim.score_matrix(cands, dkp, int(n_sims))
 
                 # Memory-safe: the full (n_sims x field_size) matrix is built,
@@ -431,11 +451,18 @@ with tabs[0]:
                 results, field_cut, cut_places, field_stack = {}, {}, {}, {}
                 for N in sorted(sizes):
                     st.write(f"Field for {N:,}-entry contest…")
-                    field = fs.build_field(
-                        slate.entities, params, N, dk_mean, n_med=int(medium),
-                        chalk_sensitivity=float(chalk), stack_tilt=float(stack_tilt),
-                        sharp_frac=float(sharp_frac), overbuild=float(overbuild),
-                        seed=101 + N, own_uncertainty=bool(own_uncertainty))
+                    if SHOWDOWN:
+                        field = sd.build_field(
+                            slate.entities, N, dk_mean, n_med=int(medium),
+                            chalk_sensitivity=float(chalk),
+                            sharp_frac=float(sharp_frac),
+                            overbuild=float(overbuild), seed=101 + N)
+                    else:
+                        field = fs.build_field(
+                            slate.entities, params, N, dk_mean, n_med=int(medium),
+                            chalk_sensitivity=float(chalk), stack_tilt=float(stack_tilt),
+                            sharp_frac=float(sharp_frac), overbuild=float(overbuild),
+                            seed=101 + N, own_uncertainty=bool(own_uncertainty))
                     beta = fs.beta_for_size(N, int(medium), float(chalk))
                     fmat = contest_sim.score_matrix(field, dkp, int(n_sims))
                     wins, t10, t100, avg = contest_sim.run_contest(
@@ -464,6 +491,7 @@ with tabs[0]:
                 "cands": cands, "cand_df": cand_df, "cand_mat": cand_mat,
                 "results": results, "field_cut": field_cut,
                 "cut_places": cut_places, "field_stack": field_stack,
+                "slate_type": SLATE_TYPE,
                 "n_sims": int(n_sims), "sizes": sorted(sizes),
             }
 
@@ -474,8 +502,8 @@ with tabs[1]:
     st.subheader("Player projections")
     ptab = exports.player_table(sim, slate)
     fcol1, fcol2 = st.columns([1, 2])
-    pos_filter = fcol1.multiselect("Position", ["QB", "RB", "WR", "TE", "DST"],
-                                   default=["QB", "RB", "WR", "TE", "DST"])
+    _positions = ["QB", "RB", "WR", "TE", "DST"] + (["K"] if SHOWDOWN else [])
+    pos_filter = fcol1.multiselect("Position", _positions, default=_positions)
     only_matched = fcol2.checkbox(
         "Only players with full stat projections (hide replacement-level)",
         value=True)
@@ -528,18 +556,26 @@ with tabs[2]:
         d2.metric("Candidates w/ a win", int((res["_wins"] > 0).sum()))
         d3.metric("Best Top100%", f"{res['Top100%'].max():.1f}%")
 
-        rcols = ["Candidate", "QB", "RB1", "RB2", "WR1", "WR2", "WR3", "TE",
-                 "FLEX", "DST", "QBstack", "Salary", "Win%", "Top10%",
-                 "Top100%", "AvgPlace"]
-        slot_cols = ["QB", "RB1", "RB2", "WR1", "WR2", "WR3", "TE", "FLEX", "DST"]
+        sd_mode = run_state.get("slate_type", "classic") == "showdown"
+        slot_cols = sd.SLOT_COLS if sd_mode else \
+            ["QB", "RB1", "RB2", "WR1", "WR2", "WR3", "TE", "FLEX", "DST"]
+        extra = (["CaptainTeam", "Split", "Salary"] if sd_mode
+                 else ["QBstack", "Salary"])
+        rcols = ["Candidate"] + slot_cols + extra + \
+            ["Win%", "Top10%", "Top100%", "AvgPlace"]
+        rcols = [c for c in rcols if c in res.columns]
         st.dataframe(relabel_cells(res[rcols].head(200), slot_cols),
                      width="stretch", height=400, hide_index=True)
 
         cc1, cc2 = st.columns(2)
         with cc1:
             st.markdown("##### Field stack composition")
-            st.altair_chart(stack_dist_chart(run_state["field_stack"][size]),
-                            width="stretch")
+            if sd_mode:
+                chart = stack_dist_chart(run_state["field_stack"][size],
+                                         prefix="CPT+", xtitle="captain team-mates")
+            else:
+                chart = stack_dist_chart(run_state["field_stack"][size])
+            st.altair_chart(chart, width="stretch")
         with cc2:
             st.markdown("##### Finishing-place distribution")
             cand_no = st.number_input(
@@ -578,7 +614,9 @@ with tabs[3]:
                                     1.0, 10000.0, 20.0)
 
         # ---- exposure control: global sliders OR per-entity min/max editors ---
-        slot_cols = ["QB", "RB1", "RB2", "WR1", "WR2", "WR3", "TE", "FLEX", "DST"]
+        exp_sd = run_state.get("slate_type", "classic") == "showdown"
+        slot_cols = sd.SLOT_COLS if exp_sd else \
+            ["QB", "RB1", "RB2", "WR1", "WR2", "WR3", "TE", "FLEX", "DST"]
         res = run_state["results"][size].copy()
         cand_mat = run_state["cand_mat"]
         nsim = run_state["n_sims"]
@@ -588,8 +626,9 @@ with tabs[3]:
         for lu in run_state["cands"]:
             for pl in lu["players"]:
                 cand_keys.add(pl["key"])
-        prim_teams = sorted({portfolio.lineup_features(res.iloc[i])["primary"]
-                             for i in range(min(len(res), 4000))} - {""})
+        prim_teams = sorted({portfolio.lineup_features(
+            res.iloc[i], slot_cols, run_state.get("slate_type", "classic"))["primary"]
+            for i in range(min(len(res), 4000))} - {""})
 
         skill_cap = dst_cap = team_cap = 1.0
         player_caps = team_caps = player_mins = team_mins = None
@@ -599,8 +638,14 @@ with tabs[3]:
         if mode == "Global caps":
             gc1, gc2, gc3 = st.columns(3)
             skill_cap = gc1.slider("Max player exposure", 0.1, 1.0, 1.0, 0.05)
-            dst_cap = gc2.slider("Max DST exposure", 0.1, 1.0, 1.0, 0.05)
-            team_cap = gc3.slider("Max stack-team exposure", 0.1, 1.0, 1.0, 0.05)
+            dst_cap = gc2.slider(
+                "Max Captain exposure" if exp_sd else "Max DST exposure",
+                0.1, 1.0, 1.0, 0.05,
+                help=("How often any one player may be your Captain."
+                      if exp_sd else None))
+            team_cap = gc3.slider(
+                "Max Captain-team exposure" if exp_sd else "Max stack-team exposure",
+                0.1, 1.0, 1.0, 0.05)
         else:
             with st.expander("Per-player exposure (min / max %)", expanded=True):
                 prows = []
@@ -679,11 +724,12 @@ with tabs[3]:
                 order = res["Candidate"].to_numpy() - 1
                 pay = pev.candidate_payout_matrix(cand_mat[:, order], field_cut, cut, prize)
                 chosen, info, W = portfolio.select_portfolio_ev(
-                    res, int(n_sel), pay, pev.utility(utility),
+                    res, int(n_sel), pay, pev.utility(utility), cols=slot_cols,
                     skill_cap=skill_cap, dst_cap=dst_cap, team_cap=team_cap,
                     max_overlap=max_overlap, player_caps=player_caps,
                     team_caps=team_caps, player_mins=player_mins,
-                    team_mins=team_mins, group_of=group_of, group_cap=group_cap)
+                    team_mins=team_mins, group_of=group_of, group_cap=group_cap,
+                    slate_type=run_state.get("slate_type", "classic"))
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Lineups", info["chosen"])
                 m2.metric("Exp $ / entry", f"${info['exp_return']/max(info['chosen'],1):.2f}")
@@ -697,25 +743,30 @@ with tabs[3]:
                           "top10": ["Top10%", "Top100%", "Win%"],
                           "top100": ["Top100%", "Top10%", "Win%"]}[objective]
                 chosen, info = portfolio.select_portfolio(
-                    res, int(n_sel), keymap, skill_cap=skill_cap, dst_cap=dst_cap,
-                    team_cap=team_cap, max_overlap=max_overlap,
+                    res, int(n_sel), keymap, cols=slot_cols, skill_cap=skill_cap,
+                    dst_cap=dst_cap, team_cap=team_cap, max_overlap=max_overlap,
                     player_caps=player_caps, team_caps=team_caps,
                     player_mins=player_mins, team_mins=team_mins,
-                    group_of=group_of, group_cap=group_cap)
+                    group_of=group_of, group_cap=group_cap,
+                    slate_type=run_state.get("slate_type", "classic"))
                 m1, m2, m3 = st.columns(3)
                 m1.metric("Lineups", info["chosen"])
-                m2.metric("Distinct stacks", info["distinct_cores"])
+                m2.metric("Distinct captains" if exp_sd else "Distinct stacks",
+                          info["distinct_cores"])
                 m3.metric("Max team", info["max_team"])
 
             # name-annotated lineup preview
             st.markdown("##### Selected lineups")
             prev = pd.DataFrame(list(chosen))
             prev_cols = [c for c in slot_cols if c in prev.columns]
-            keep = prev_cols + [c for c in ("QBstack", "Salary") if c in prev.columns]
+            info_cols = ["CaptainTeam", "Split", "Salary"] if exp_sd else \
+                ["QBstack", "Salary"]
+            keep = prev_cols + [c for c in info_cols if c in prev.columns]
             st.dataframe(relabel_cells(prev[keep], prev_cols),
                          width="stretch", height=300, hide_index=True)
 
-            up = exports.dk_upload(chosen, slate)   # duplicate DK headers (CSV)
+            up = (sd.dk_upload(chosen, slate) if exp_sd
+                  else exports.dk_upload(chosen, slate))  # duplicate DK headers
             st.download_button(
                 "⬇  Download DK_upload.csv (DraftKings IDs)", up.to_csv(index=False),
                 file_name=f"DK_upload_{size}.csv", mime="text/csv",

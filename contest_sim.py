@@ -16,14 +16,20 @@ import numpy as np
 
 def score_matrix(lineups, dk, n_sim):
     """(n_sim, n_lineups) per-sim DK totals. `lineups` are builder dicts with a
-    'players' list of entity dicts carrying 'key'."""
+    'players' list of entity dicts carrying 'key'.
+
+    Showdown lineups carry a 'captain_key'; that player's points are scored at
+    1.5x (DK Captain scoring). Classic lineups omit it and score straight sums."""
     cols = []
     for lu in lineups:
         t = np.zeros(n_sim, dtype=np.float32)
+        cap = lu.get("captain_key")
         for pl in lu["players"]:
             arr = dk.get(pl["key"])
             if arr is not None:
                 t += arr
+                if cap is not None and pl["key"] == cap:
+                    t += 0.5 * arr          # base 1.0x already added -> 1.5x total
         cols.append(t)
     return np.column_stack(cols) if cols else np.zeros((n_sim, 0), np.float32)
 
